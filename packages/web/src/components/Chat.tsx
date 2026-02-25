@@ -11,8 +11,13 @@ interface ChatProps {
 }
 
 export function Chat({ agent }: ChatProps) {
-  const messages = useChatStore((s) => s.messages);
-  const isStreaming = useChatStore((s) => s.session.isStreaming);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const sessionDataMap = useChatStore((s) => s.sessionDataMap);
+  const isStreaming = useChatStore((s) => s.activeIsStreaming);
+  const messages = activeSessionId
+    ? sessionDataMap.get(activeSessionId)?.messages ?? []
+    : [];
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const shouldAutoScroll = useRef(true);
 
@@ -45,8 +50,6 @@ export function Chat({ agent }: ChatProps) {
             {messages.map((msg) => (
               <Message key={msg.id} message={msg} />
             ))}
-
-            {/* Scroll anchor */}
             <div className="h-1" />
           </div>
         )}
@@ -78,7 +81,6 @@ function EmptyState() {
           <button
             key={suggestion}
             onClick={() => {
-              // Find the textarea and set its value
               const textarea = document.querySelector("textarea");
               if (textarea) {
                 const nativeInputValueSetter = Object.getOwnPropertyDescriptor(

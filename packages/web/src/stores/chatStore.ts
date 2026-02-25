@@ -1,38 +1,70 @@
 import { create } from "zustand";
 import type {
   ChatMessage,
+  LiveSessionInfo,
   ModelInfo,
   SavedSessionInfo,
-  SessionState,
+  SessionData,
   ThinkingLevel,
   ToolExecution,
 } from "../lib/types";
+
+function emptySessionData(): SessionData {
+  return {
+    messages: [],
+    toolExecutions: new Map(),
+    currentAssistantId: null,
+  };
+}
 
 interface ChatStore {
   // Connection
   connected: boolean;
   setConnected: (connected: boolean) => void;
 
-  // Session state
-  session: SessionState;
-  setSession: (session: Partial<SessionState>) => void;
+  // Active session
+  activeSessionId: string | null;
+  setActiveSessionId: (id: string | null) => void;
 
-  // Messages
-  messages: ChatMessage[];
-  addMessage: (msg: ChatMessage) => void;
-  updateMessage: (id: string, update: Partial<ChatMessage>) => void;
-  clearMessages: () => void;
+  // Per-session data (messages, tool executions, streaming cursor)
+  sessionDataMap: Map<string, SessionData>;
+  getSessionData: (sessionId: string) => SessionData;
+  ensureSessionData: (sessionId: string) => SessionData;
 
-  // Tool executions (tracked separately for UI)
-  toolExecutions: Map<string, ToolExecution>;
-  setToolExecution: (id: string, exec: ToolExecution) => void;
-  clearToolExecutions: () => void;
+  // Convenience: active session's messages (for components)
+  getActiveMessages: () => ChatMessage[];
 
-  // Available models
+  // Message operations (scoped to a session)
+  addMessage: (sessionId: string, msg: ChatMessage) => void;
+  updateMessage: (sessionId: string, msgId: string, update: Partial<ChatMessage>) => void;
+  setMessages: (sessionId: string, msgs: ChatMessage[]) => void;
+  setCurrentAssistantId: (sessionId: string, id: string | null) => void;
+
+  // Tool executions (scoped to a session)
+  setToolExecution: (sessionId: string, toolId: string, exec: ToolExecution) => void;
+
+  // Remove all data for a session
+  removeSessionData: (sessionId: string) => void;
+
+  // Live sessions (alive in this tab)
+  liveSessions: LiveSessionInfo[];
+  setLiveSessions: (sessions: LiveSessionInfo[], activeId: string | null) => void;
+
+  // Session-level state (model, thinking, path) — for the active session
+  activeModel: ModelInfo | null;
+  setActiveModel: (model: ModelInfo | null) => void;
+  activeThinkingLevel: ThinkingLevel;
+  setActiveThinkingLevel: (level: ThinkingLevel) => void;
+  activeSessionPath: string | null;
+  setActiveSessionPath: (path: string | null) => void;
+  activeIsStreaming: boolean;
+  setActiveIsStreaming: (streaming: boolean) => void;
+
+  // Available models (global)
   models: ModelInfo[];
   setModels: (models: ModelInfo[]) => void;
 
-  // Saved sessions
+  // Saved sessions from disk
   savedSessions: SavedSessionInfo[];
   setSavedSessions: (sessions: SavedSessionInfo[]) => void;
   savedSessionsLoading: boolean;
@@ -41,49 +73,108 @@ interface ChatStore {
   // Auth status
   authStatus: Record<string, { hasCredentials: boolean }>;
   setAuthStatus: (status: Record<string, { hasCredentials: boolean }>) => void;
-
-  // UI state
-  isSettingsOpen: boolean;
-  setSettingsOpen: (open: boolean) => void;
 }
 
-export const useChatStore = create<ChatStore>((set) => ({
+export const useChatStore = create<ChatStore>((set, get) => ({
   // Connection
   connected: false,
   setConnected: (connected) => set({ connected }),
 
-  // Session
-  session: {
-    sessionId: null,
-    sessionPath: null,
-    isStreaming: false,
-    model: null,
-    thinkingLevel: "off" as ThinkingLevel,
+  // Active session
+  activeSessionId: null,
+  setActiveSessionId: (activeSessionId) => set({ activeSessionId }),
+
+  // Session data map
+  sessionDataMap: new Map(),
+
+  getSessionData: (sessionId) => {
+    return get().sessionDataMap.get(sessionId) ?? emptySessionData();
   },
-  setSession: (partial) =>
-    set((state) => ({ session: { ...state.session, ...partial } })),
 
-  // Messages
-  messages: [],
-  addMessage: (msg) =>
-    set((state) => ({ messages: [...state.messages, msg] })),
-  updateMessage: (id, update) =>
-    set((state) => ({
-      messages: state.messages.map((m) =>
-        m.id === id ? { ...m, ...update } : m,
-      ),
-    })),
-  clearMessages: () => set({ messages: [] }),
+  ensureSessionData: (sessionId) => {
+    const map = get().sessionDataMap;
+    if (!map.has(sessionId)) {
+      const next = new Map(map);
+      next.set(sessionId, emptySessionData());
+      set({ sessionDataMap: next });
+      return next.get(sessionId)!;
+    }
+    return map.get(sessionId)!;
+  },
 
-  // Tool executions
-  toolExecutions: new Map(),
-  setToolExecution: (id, exec) =>
+  getActiveMessages: () => {
+    const { activeSessionId, sessionDataMap } = get();
+    if (!activeSessionId) return [];
+    return sessionDataMap.get(activeSessionId)?.messages ?? [];
+  },
+
+  addMessage: (sessionId, msg) =>
     set((state) => {
-      const next = new Map(state.toolExecutions);
-      next.set(id, exec);
-      return { toolExecutions: next };
+      const map = new Map(state.sessionDataMap);
+      const data = map.get(sessionId) ?? emptySessionData();
+      map.set(sessionId, { ...data, messages: [...data.messages, msg] });
+      return { sessionDataMap: map };
     }),
-  clearToolExecutions: () => set({ toolExecutions: new Map() }),
+
+  updateMessage: (sessionId, msgId, update) =>
+    set((state) => {
+      const map = new Map(state.sessionDataMap);
+      const data = map.get(sessionId);
+      if (!data) return {};
+      map.set(sessionId, {
+        ...data,
+        messages: data.messages.map((m) => (m.id === msgId ? { ...m, ...update } : m)),
+      });
+      return { sessionDataMap: map };
+    }),
+
+  setMessages: (sessionId, msgs) =>
+    set((state) => {
+      const map = new Map(state.sessionDataMap);
+      const data = map.get(sessionId) ?? emptySessionData();
+      map.set(sessionId, { ...data, messages: msgs });
+      return { sessionDataMap: map };
+    }),
+
+  setCurrentAssistantId: (sessionId, id) =>
+    set((state) => {
+      const map = new Map(state.sessionDataMap);
+      const data = map.get(sessionId) ?? emptySessionData();
+      map.set(sessionId, { ...data, currentAssistantId: id });
+      return { sessionDataMap: map };
+    }),
+
+  setToolExecution: (sessionId, toolId, exec) =>
+    set((state) => {
+      const map = new Map(state.sessionDataMap);
+      const data = map.get(sessionId) ?? emptySessionData();
+      const tools = new Map(data.toolExecutions);
+      tools.set(toolId, exec);
+      map.set(sessionId, { ...data, toolExecutions: tools });
+      return { sessionDataMap: map };
+    }),
+
+  removeSessionData: (sessionId) =>
+    set((state) => {
+      const map = new Map(state.sessionDataMap);
+      map.delete(sessionId);
+      return { sessionDataMap: map };
+    }),
+
+  // Live sessions
+  liveSessions: [],
+  setLiveSessions: (liveSessions, activeId) =>
+    set({ liveSessions, activeSessionId: activeId }),
+
+  // Active session state
+  activeModel: null,
+  setActiveModel: (activeModel) => set({ activeModel }),
+  activeThinkingLevel: "off",
+  setActiveThinkingLevel: (activeThinkingLevel) => set({ activeThinkingLevel }),
+  activeSessionPath: null,
+  setActiveSessionPath: (activeSessionPath) => set({ activeSessionPath }),
+  activeIsStreaming: false,
+  setActiveIsStreaming: (activeIsStreaming) => set({ activeIsStreaming }),
 
   // Models
   models: [],
@@ -98,8 +189,4 @@ export const useChatStore = create<ChatStore>((set) => ({
   // Auth
   authStatus: {},
   setAuthStatus: (authStatus) => set({ authStatus }),
-
-  // UI
-  isSettingsOpen: false,
-  setSettingsOpen: (isSettingsOpen) => set({ isSettingsOpen }),
 }));

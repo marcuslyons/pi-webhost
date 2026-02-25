@@ -63,3 +63,21 @@ export interface SavedSessionInfo {
   messageCount: number;
   firstMessage: string;
 }
+
+/** A session that's currently alive in this browser tab. */
+export interface LiveSessionInfo {
+  id: string;
+  sessionPath: string | null;
+  cwd: string;
+  isStreaming: boolean;
+  model: ModelInfo | null;
+  messageCount: number;
+}
+
+/** Per-session data cached on the client. */
+export interface SessionData {
+  messages: ChatMessage[];
+  toolExecutions: Map<string, ToolExecution>;
+  /** Track the current assistant message being streamed. */
+  currentAssistantId: string | null;
+}

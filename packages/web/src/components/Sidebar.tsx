@@ -1,6 +1,6 @@
 import { useChatStore } from "../stores/chatStore";
 import { useEffect, useState } from "react";
-import type { SavedSessionInfo } from "../lib/types";
+import type { LiveSessionInfo, SavedSessionInfo } from "../lib/types";
 
 interface SidebarProps {
   open: boolean;
@@ -9,6 +9,8 @@ interface SidebarProps {
     fetchAuthStatus: () => Promise<void>;
     listSessions: (cwd?: string) => void;
     switchSession: (sessionPath: string) => void;
+    setActiveSession: (sessionId: string) => void;
+    closeSession: (sessionId: string) => void;
     newSession: (cwd?: string) => void;
   };
 }
@@ -17,12 +19,13 @@ export function Sidebar({ open, onClose, agent }: SidebarProps) {
   const authStatus = useChatStore((s) => s.authStatus);
   const savedSessions = useChatStore((s) => s.savedSessions);
   const savedSessionsLoading = useChatStore((s) => s.savedSessionsLoading);
-  const currentSessionPath = useChatStore((s) => s.session.sessionPath);
+  const liveSessions = useChatStore((s) => s.liveSessions);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
   const [apiKeyForm, setApiKeyForm] = useState({ provider: "anthropic", apiKey: "" });
   const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<"sessions" | "settings">("sessions");
 
-  // Fetch sessions when sidebar opens
+  // Fetch saved sessions when sidebar opens
   useEffect(() => {
     if (open) {
       agent.listSessions();
@@ -47,8 +50,20 @@ export function Sidebar({ open, onClose, agent }: SidebarProps) {
     }
   };
 
-  const handleSwitchSession = (session: SavedSessionInfo) => {
-    agent.switchSession(session.path);
+  const handleSwitchToLive = (session: LiveSessionInfo) => {
+    if (session.id !== activeSessionId) {
+      agent.setActiveSession(session.id);
+    }
+  };
+
+  const handleSwitchToSaved = (session: SavedSessionInfo) => {
+    // Check if this saved session is already open as a live session
+    const alreadyLive = liveSessions.find((ls) => ls.sessionPath === session.path);
+    if (alreadyLive) {
+      agent.setActiveSession(alreadyLive.id);
+    } else {
+      agent.switchSession(session.path);
+    }
     onClose();
   };
 
@@ -117,10 +132,13 @@ export function Sidebar({ open, onClose, agent }: SidebarProps) {
           <div className="flex-1 overflow-y-auto">
             {activeTab === "sessions" ? (
               <SessionsTab
-                sessions={savedSessions}
-                loading={savedSessionsLoading}
-                currentSessionPath={currentSessionPath}
-                onSwitch={handleSwitchSession}
+                liveSessions={liveSessions}
+                savedSessions={savedSessions}
+                savedSessionsLoading={savedSessionsLoading}
+                activeSessionId={activeSessionId}
+                onSwitchLive={handleSwitchToLive}
+                onSwitchSaved={handleSwitchToSaved}
+                onCloseLive={(id) => agent.closeSession(id)}
                 onNew={handleNewSession}
                 onRefresh={() => agent.listSessions()}
               />
@@ -143,22 +161,32 @@ export function Sidebar({ open, onClose, agent }: SidebarProps) {
 // ── Sessions Tab ──────────────────────────────────────────────────────
 
 function SessionsTab({
-  sessions,
-  loading,
-  currentSessionPath,
-  onSwitch,
+  liveSessions,
+  savedSessions,
+  savedSessionsLoading,
+  activeSessionId,
+  onSwitchLive,
+  onSwitchSaved,
+  onCloseLive,
   onNew,
   onRefresh,
 }: {
-  sessions: SavedSessionInfo[];
-  loading: boolean;
-  currentSessionPath: string | null;
-  onSwitch: (session: SavedSessionInfo) => void;
+  liveSessions: LiveSessionInfo[];
+  savedSessions: SavedSessionInfo[];
+  savedSessionsLoading: boolean;
+  activeSessionId: string | null;
+  onSwitchLive: (session: LiveSessionInfo) => void;
+  onSwitchSaved: (session: SavedSessionInfo) => void;
+  onCloseLive: (sessionId: string) => void;
   onNew: () => void;
   onRefresh: () => void;
 }) {
+  // Filter saved sessions that are already open as live sessions
+  const liveSessionPaths = new Set(liveSessions.map((ls) => ls.sessionPath).filter(Boolean));
+  const nonLiveSavedSessions = savedSessions.filter((s) => !liveSessionPaths.has(s.path));
+
   return (
-    <div className="p-3 space-y-3">
+    <div className="p-3 space-y-4">
       {/* New session button */}
       <button
         onClick={onNew}
@@ -170,100 +198,150 @@ function SessionsTab({
         New Session
       </button>
 
-      {/* Session list header */}
-      <div className="flex items-center justify-between px-1">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
-          Recent Sessions
-        </span>
-        <button
-          onClick={onRefresh}
-          disabled={loading}
-          className="text-zinc-600 hover:text-zinc-400 transition-colors disabled:opacity-50"
-          title="Refresh"
-        >
-          <svg
-            className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-            />
-          </svg>
-        </button>
-      </div>
-
-      {/* Loading state */}
-      {loading && sessions.length === 0 && (
-        <div className="flex items-center justify-center py-8">
-          <span className="text-xs text-zinc-600">Loading sessions...</span>
-        </div>
-      )}
-
-      {/* Empty state */}
-      {!loading && sessions.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-8 text-center">
-          <span className="text-xs text-zinc-600">No saved sessions</span>
-          <span className="mt-1 text-[10px] text-zinc-700">
-            Send a message to start a session
-          </span>
-        </div>
-      )}
-
-      {/* Session list */}
-      <div className="space-y-1">
-        {sessions.map((session) => {
-          const isCurrent = currentSessionPath === session.path;
-          const modified = new Date(session.modified);
-          const timeStr = formatRelativeTime(modified);
-
-          return (
-            <button
-              key={session.path}
-              onClick={() => !isCurrent && onSwitch(session)}
-              disabled={isCurrent}
-              className={`group flex w-full flex-col gap-1 rounded-lg px-3 py-2.5 text-left transition-colors ${
-                isCurrent
-                  ? "bg-violet-500/10 border border-violet-500/20"
-                  : "hover:bg-zinc-800/70 border border-transparent"
-              }`}
-            >
-              {/* Title row */}
-              <div className="flex items-center gap-2">
-                {isCurrent && (
-                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-400" />
-                )}
-                <span
-                  className={`truncate text-sm font-medium ${
-                    isCurrent ? "text-violet-300" : "text-zinc-300 group-hover:text-zinc-100"
+      {/* Live Sessions (open in this tab) */}
+      {liveSessions.length > 0 && (
+        <section>
+          <div className="flex items-center gap-2 px-1 mb-2">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+              Open Sessions
+            </span>
+            <span className="rounded-full bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-500">
+              {liveSessions.length}
+            </span>
+          </div>
+          <div className="space-y-1">
+            {liveSessions.map((session) => {
+              const isCurrent = session.id === activeSessionId;
+              return (
+                <div
+                  key={session.id}
+                  className={`group flex items-center gap-2 rounded-lg px-3 py-2 transition-colors ${
+                    isCurrent
+                      ? "bg-violet-500/10 border border-violet-500/20"
+                      : "hover:bg-zinc-800/70 border border-transparent"
                   }`}
                 >
+                  <button
+                    onClick={() => onSwitchLive(session)}
+                    className="flex flex-1 flex-col gap-0.5 text-left min-w-0"
+                  >
+                    <div className="flex items-center gap-2">
+                      {/* Streaming indicator */}
+                      <span
+                        className={`h-2 w-2 shrink-0 rounded-full ${
+                          session.isStreaming
+                            ? "bg-violet-500 animate-pulse"
+                            : isCurrent
+                              ? "bg-emerald-500"
+                              : "bg-zinc-600"
+                        }`}
+                      />
+                      <span
+                        className={`truncate text-sm font-medium ${
+                          isCurrent ? "text-violet-300" : "text-zinc-300"
+                        }`}
+                      >
+                        {session.model?.name ?? "No model"}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-zinc-600 pl-4">
+                      {session.messageCount} msg{session.messageCount !== 1 ? "s" : ""}
+                      {session.isStreaming ? " · streaming" : ""}
+                    </span>
+                  </button>
+
+                  {/* Close button */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCloseLive(session.id);
+                    }}
+                    className="shrink-0 rounded p-1 text-zinc-600 opacity-0 group-hover:opacity-100 hover:text-zinc-300 hover:bg-zinc-700 transition-all"
+                    title="Close session"
+                  >
+                    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Saved Sessions from disk */}
+      <section>
+        <div className="flex items-center justify-between px-1 mb-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+            Saved Sessions
+          </span>
+          <button
+            onClick={onRefresh}
+            disabled={savedSessionsLoading}
+            className="text-zinc-600 hover:text-zinc-400 transition-colors disabled:opacity-50"
+            title="Refresh"
+          >
+            <svg
+              className={`h-3.5 w-3.5 ${savedSessionsLoading ? "animate-spin" : ""}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+          </button>
+        </div>
+
+        {savedSessionsLoading && nonLiveSavedSessions.length === 0 && (
+          <div className="flex items-center justify-center py-6">
+            <span className="text-xs text-zinc-600">Loading sessions...</span>
+          </div>
+        )}
+
+        {!savedSessionsLoading && nonLiveSavedSessions.length === 0 && (
+          <div className="flex flex-col items-center justify-center py-6 text-center">
+            <span className="text-xs text-zinc-600">No other saved sessions</span>
+          </div>
+        )}
+
+        <div className="space-y-1">
+          {nonLiveSavedSessions.map((session) => {
+            const modified = new Date(session.modified);
+            const timeStr = formatRelativeTime(modified);
+
+            return (
+              <button
+                key={session.path}
+                onClick={() => onSwitchSaved(session)}
+                className="group flex w-full flex-col gap-1 rounded-lg px-3 py-2.5 text-left hover:bg-zinc-800/70 border border-transparent transition-colors"
+              >
+                <span className="truncate text-sm font-medium text-zinc-300 group-hover:text-zinc-100">
                   {session.name || truncateMessage(session.firstMessage) || "Untitled"}
                 </span>
-              </div>
-
-              {/* Meta row */}
-              <div className="flex items-center gap-2 text-[10px] text-zinc-600">
-                <span>{timeStr}</span>
-                <span>·</span>
-                <span>{session.messageCount} msg{session.messageCount !== 1 ? "s" : ""}</span>
-                {session.name && session.firstMessage && (
-                  <>
-                    <span>·</span>
-                    <span className="truncate max-w-[140px]">
-                      {truncateMessage(session.firstMessage)}
-                    </span>
-                  </>
-                )}
-              </div>
-            </button>
-          );
-        })}
-      </div>
+                <div className="flex items-center gap-2 text-[10px] text-zinc-600">
+                  <span>{timeStr}</span>
+                  <span>·</span>
+                  <span>{session.messageCount} msg{session.messageCount !== 1 ? "s" : ""}</span>
+                  {session.name && session.firstMessage && (
+                    <>
+                      <span>·</span>
+                      <span className="truncate max-w-[140px]">
+                        {truncateMessage(session.firstMessage)}
+                      </span>
+                    </>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 }

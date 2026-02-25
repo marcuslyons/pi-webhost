@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useChatStore } from "../stores/chatStore";
-import type { ChatMessage, ThinkingLevel } from "../lib/types";
+import type { ThinkingLevel } from "../lib/types";
 
 let messageIdCounter = 0;
 function nextId() {
@@ -10,23 +10,15 @@ function nextId() {
 /**
  * Hook that manages the WebSocket connection to the pi-webhost server
  * and translates Pi events into chat store updates.
+ *
+ * Supports multiple concurrent sessions. Events are tagged with sessionId
+ * and routed to the correct per-session data in the store.
  */
 export function useAgent() {
   const wsRef = useRef<WebSocket | null>(null);
-  const currentAssistantId = useRef<string | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const {
-    setConnected,
-    setSession,
-    addMessage,
-    updateMessage,
-    setToolExecution,
-    setModels,
-    setAuthStatus,
-    setSavedSessions,
-    setSavedSessionsLoading,
-  } = useChatStore.getState();
+  const store = useChatStore.getState;
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -37,22 +29,18 @@ export function useAgent() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setConnected(true);
-      // Fetch initial data
+      store().setConnected(true);
       fetchModels();
       fetchAuthStatus();
     };
 
     ws.onclose = () => {
-      setConnected(false);
+      store().setConnected(false);
       wsRef.current = null;
-      // Reconnect after delay
       reconnectTimer.current = setTimeout(connect, 3000);
     };
 
-    ws.onerror = () => {
-      // onclose will fire after this
-    };
+    ws.onerror = () => {};
 
     ws.onmessage = (evt) => {
       try {
@@ -64,139 +52,122 @@ export function useAgent() {
     };
   }, []);
 
+  // ── Server message routing ────────────────────────────────────────
+
   const handleServerMessage = useCallback((data: any) => {
-    const store = useChatStore.getState();
+    const s = store();
 
     if (data.type === "session_created") {
-      setSession({
-        sessionId: data.sessionId,
-        sessionPath: data.sessionPath ?? null,
-        model: data.model,
-      });
+      const sid = data.sessionId;
+      s.ensureSessionData(sid);
+      s.setActiveSessionId(sid);
+      s.setActiveModel(data.model);
+      s.setActiveSessionPath(data.sessionPath ?? null);
+      s.setActiveIsStreaming(false);
       return;
     }
 
     if (data.type === "session_switched") {
-      const store = useChatStore.getState();
-      store.clearMessages();
-      store.clearToolExecutions();
+      const sid = data.sessionId;
+      s.ensureSessionData(sid);
+      s.setActiveSessionId(sid);
+      s.setActiveModel(data.model);
+      s.setActiveSessionPath(data.sessionPath ?? null);
+      s.setActiveThinkingLevel(data.thinkingLevel ?? "off");
+      s.setActiveIsStreaming(false);
 
-      setSession({
-        sessionId: data.sessionId,
-        sessionPath: data.sessionPath ?? null,
-        model: data.model,
-        thinkingLevel: data.thinkingLevel ?? "off",
-        isStreaming: false,
-      });
-
-      // Rebuild chat messages from the loaded session history
+      // Rebuild messages from loaded history
       if (data.messages?.length) {
-        for (const msg of data.messages) {
-          if (msg.role === "user") {
-            addMessage({
-              id: nextId(),
-              role: "user",
-              content: msg.content,
-              timestamp: msg.timestamp,
-            });
-          } else if (msg.role === "assistant") {
-            addMessage({
-              id: nextId(),
-              role: "assistant",
-              content: msg.content,
-              timestamp: msg.timestamp,
-              model: msg.model,
-              thinkingContent: msg.thinkingContent,
-              isStreaming: false,
-            });
-            // Add tool calls as separate messages
-            if (msg.toolCalls?.length) {
-              for (const tc of msg.toolCalls) {
-                addMessage({
-                  id: `tool-${tc.id}`,
-                  role: "tool_call",
-                  content: formatToolArgs(tc.name, tc.arguments ?? {}),
-                  timestamp: msg.timestamp,
-                  toolName: tc.name,
-                  toolCallId: tc.id,
-                });
-              }
-            }
-          } else if (msg.role === "tool_result") {
-            addMessage({
-              id: `toolresult-${msg.toolCallId ?? nextId()}`,
-              role: "tool_result",
-              content: msg.content,
-              timestamp: msg.timestamp,
-              toolName: msg.toolName,
-              toolCallId: msg.toolCallId,
-              isError: msg.isError,
-            });
-          } else if (msg.role === "system") {
-            addMessage({
-              id: nextId(),
-              role: "system",
-              content: msg.content,
-              timestamp: msg.timestamp,
-            });
-          }
-        }
+        const msgs = buildMessagesFromHistory(data.messages);
+        s.setMessages(sid, msgs);
       }
+      return;
+    }
+
+    if (data.type === "live_sessions_update") {
+      s.setLiveSessions(data.sessions, data.activeSessionId);
       return;
     }
 
     if (data.type === "error") {
-      addMessage({
-        id: nextId(),
-        role: "system",
-        content: `Error: ${data.message}`,
-        timestamp: Date.now(),
-      });
+      // Show error in the relevant session (or active)
+      const sid = data.sessionId ?? s.activeSessionId;
+      if (sid) {
+        s.addMessage(sid, {
+          id: nextId(),
+          role: "system",
+          content: `Error: ${data.message}`,
+          timestamp: Date.now(),
+        });
+      }
       return;
     }
 
     if (data.type === "response") {
-      // Handle specific responses
       if (data.command === "get_models" && data.success) {
-        setModels(data.data.models);
+        s.setModels(data.data.models);
       }
       if (data.command === "set_model" && data.success) {
-        setSession({ model: data.data });
+        s.setActiveModel(data.data);
       }
       if (data.command === "list_persisted_sessions" && data.success) {
-        setSavedSessions(data.data.sessions);
-        setSavedSessionsLoading(false);
+        s.setSavedSessions(data.data.sessions);
+        s.setSavedSessionsLoading(false);
+      }
+      if (data.command === "set_active_session" && data.success) {
+        const newActiveId = data.data.activeSessionId;
+        s.setActiveSessionId(newActiveId);
+        // Update active session state from live sessions
+        const live = s.liveSessions.find((ls) => ls.id === newActiveId);
+        if (live) {
+          s.setActiveModel(live.model);
+          s.setActiveSessionPath(live.sessionPath);
+          s.setActiveIsStreaming(live.isStreaming);
+        }
+      }
+      if (data.command === "close_session" && data.success) {
+        s.removeSessionData(data.data?.closedSessionId);
+        if (data.data?.activeSessionId) {
+          s.setActiveSessionId(data.data.activeSessionId);
+        }
       }
       return;
     }
 
     if (data.type === "event") {
-      handlePiEvent(data.event);
+      handlePiEvent(data.sessionId, data.event);
     }
   }, []);
 
-  const handlePiEvent = useCallback((event: any) => {
-    const store = useChatStore.getState();
+  // ── Pi event handling (scoped to sessionId) ───────────────────────
+
+  const handlePiEvent = useCallback((sessionId: string, event: any) => {
+    if (!sessionId) return;
+    const s = store();
+    s.ensureSessionData(sessionId);
+    const isActive = sessionId === s.activeSessionId;
 
     switch (event.type) {
       case "agent_start":
-        setSession({ isStreaming: true });
+        if (isActive) s.setActiveIsStreaming(true);
         break;
 
-      case "agent_end":
-        setSession({ isStreaming: false });
-        if (currentAssistantId.current) {
-          updateMessage(currentAssistantId.current, { isStreaming: false });
-          currentAssistantId.current = null;
+      case "agent_end": {
+        if (isActive) s.setActiveIsStreaming(false);
+        const data = s.getSessionData(sessionId);
+        if (data.currentAssistantId) {
+          s.updateMessage(sessionId, data.currentAssistantId, { isStreaming: false });
+          s.setCurrentAssistantId(sessionId, null);
         }
         break;
+      }
 
       case "message_start": {
         const msg = event.message;
         if (msg?.role === "assistant") {
           const id = nextId();
-          currentAssistantId.current = id;
-          addMessage({
+          s.setCurrentAssistantId(sessionId, id);
+          s.addMessage(sessionId, {
             id,
             role: "assistant",
             content: "",
@@ -210,23 +181,20 @@ export function useAgent() {
 
       case "message_update": {
         const delta = event.assistantMessageEvent;
-        if (!delta || !currentAssistantId.current) break;
+        const data = s.getSessionData(sessionId);
+        if (!delta || !data.currentAssistantId) break;
 
         if (delta.type === "text_delta") {
-          const current = useChatStore.getState().messages.find(
-            (m) => m.id === currentAssistantId.current
-          );
+          const current = data.messages.find((m) => m.id === data.currentAssistantId);
           if (current) {
-            updateMessage(currentAssistantId.current, {
+            s.updateMessage(sessionId, data.currentAssistantId, {
               content: current.content + delta.delta,
             });
           }
         } else if (delta.type === "thinking_delta") {
-          const current = useChatStore.getState().messages.find(
-            (m) => m.id === currentAssistantId.current
-          );
+          const current = data.messages.find((m) => m.id === data.currentAssistantId);
           if (current) {
-            updateMessage(currentAssistantId.current, {
+            s.updateMessage(sessionId, data.currentAssistantId, {
               thinkingContent: (current.thinkingContent ?? "") + delta.delta,
             });
           }
@@ -235,20 +203,21 @@ export function useAgent() {
       }
 
       case "message_end": {
-        if (currentAssistantId.current) {
-          updateMessage(currentAssistantId.current, { isStreaming: false });
+        const data = s.getSessionData(sessionId);
+        if (data.currentAssistantId) {
+          s.updateMessage(sessionId, data.currentAssistantId, { isStreaming: false });
         }
         break;
       }
 
       case "tool_execution_start": {
-        setToolExecution(event.toolCallId, {
+        s.setToolExecution(sessionId, event.toolCallId, {
           toolCallId: event.toolCallId,
           toolName: event.toolName,
           args: event.args,
           status: "running",
         });
-        addMessage({
+        s.addMessage(sessionId, {
           id: `tool-${event.toolCallId}`,
           role: "tool_call",
           content: formatToolArgs(event.toolName, event.args),
@@ -261,23 +230,19 @@ export function useAgent() {
 
       case "tool_execution_update": {
         const partial = event.partialResult?.content?.[0]?.text ?? "";
-        setToolExecution(event.toolCallId, {
+        s.setToolExecution(sessionId, event.toolCallId, {
           toolCallId: event.toolCallId,
           toolName: event.toolName,
           args: event.args,
           status: "running",
           partialResult: partial,
         });
-        // Update the tool result message with partial output
-        updateMessage(`toolresult-${event.toolCallId}`, {
-          content: partial,
-        });
-        // If no result message exists yet, create one
-        const exists = useChatStore.getState().messages.find(
-          (m) => m.id === `toolresult-${event.toolCallId}`
-        );
-        if (!exists && partial) {
-          addMessage({
+        const data = s.getSessionData(sessionId);
+        const exists = data.messages.find((m) => m.id === `toolresult-${event.toolCallId}`);
+        if (exists) {
+          s.updateMessage(sessionId, `toolresult-${event.toolCallId}`, { content: partial });
+        } else if (partial) {
+          s.addMessage(sessionId, {
             id: `toolresult-${event.toolCallId}`,
             role: "tool_result",
             content: partial,
@@ -291,7 +256,7 @@ export function useAgent() {
 
       case "tool_execution_end": {
         const resultText = event.result?.content?.[0]?.text ?? "";
-        setToolExecution(event.toolCallId, {
+        s.setToolExecution(sessionId, event.toolCallId, {
           toolCallId: event.toolCallId,
           toolName: event.toolName,
           args: {},
@@ -299,17 +264,15 @@ export function useAgent() {
           result: resultText,
           isError: event.isError,
         });
-        // Update or create result message
-        const existingResult = useChatStore.getState().messages.find(
-          (m) => m.id === `toolresult-${event.toolCallId}`
-        );
+        const data = s.getSessionData(sessionId);
+        const existingResult = data.messages.find((m) => m.id === `toolresult-${event.toolCallId}`);
         if (existingResult) {
-          updateMessage(`toolresult-${event.toolCallId}`, {
+          s.updateMessage(sessionId, `toolresult-${event.toolCallId}`, {
             content: resultText,
             isError: event.isError,
           });
         } else {
-          addMessage({
+          s.addMessage(sessionId, {
             id: `toolresult-${event.toolCallId}`,
             role: "tool_result",
             content: resultText,
@@ -323,7 +286,7 @@ export function useAgent() {
       }
 
       case "auto_compaction_start":
-        addMessage({
+        s.addMessage(sessionId, {
           id: nextId(),
           role: "system",
           content: `Compacting context (${event.reason})...`,
@@ -333,7 +296,7 @@ export function useAgent() {
 
       case "auto_compaction_end":
         if (event.result) {
-          addMessage({
+          s.addMessage(sessionId, {
             id: nextId(),
             role: "system",
             content: `Context compacted. Tokens before: ${event.result.tokensBefore}`,
@@ -344,60 +307,83 @@ export function useAgent() {
     }
   }, []);
 
-  // Send command to server
+  // ── Send command to server ────────────────────────────────────────
+
   const send = useCallback((cmd: any) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(cmd));
     }
   }, []);
 
-  // Public API
+  // ── Public API ────────────────────────────────────────────────────
+
   const sendPrompt = useCallback(
     (message: string) => {
-      const store = useChatStore.getState();
+      const s = store();
+      const sid = s.activeSessionId;
 
-      // Add user message to chat
-      addMessage({
-        id: nextId(),
-        role: "user",
-        content: message,
-        timestamp: Date.now(),
-      });
+      // Add user message to the active session (or it'll be created)
+      if (sid) {
+        s.addMessage(sid, {
+          id: nextId(),
+          role: "user",
+          content: message,
+          timestamp: Date.now(),
+        });
+      }
 
-      // Handle queuing during streaming
-      if (store.session.isStreaming) {
-        send({ type: "follow_up", message });
+      if (s.activeIsStreaming) {
+        send({ type: "follow_up", message, sessionId: sid });
       } else {
-        send({ type: "prompt", message });
+        // If no active session, prompt will auto-create one on the server
+        send({ type: "prompt", message, sessionId: sid });
+
+        // If we didn't have a session, add user message after creation
+        if (!sid) {
+          // The message will be shown after session_created arrives
+          // Store it temporarily
+          const pendingMsg = {
+            id: nextId(),
+            role: "user" as const,
+            content: message,
+            timestamp: Date.now(),
+          };
+          // We'll add it when session_created fires via a small workaround:
+          // Actually, the server sends session_created before the prompt response,
+          // so let's just queue a microtask
+          queueMicrotask(() => {
+            const newSid = store().activeSessionId;
+            if (newSid) {
+              store().addMessage(newSid, pendingMsg);
+            }
+          });
+        }
       }
     },
     [send],
   );
 
-  const abort = useCallback(() => {
-    send({ type: "abort" });
+  const abort = useCallback((sessionId?: string) => {
+    send({ type: "abort", sessionId: sessionId ?? store().activeSessionId });
   }, [send]);
 
   const setModel = useCallback(
     (provider: string, modelId: string) => {
-      send({ type: "set_model", provider, modelId });
+      send({ type: "set_model", provider, modelId, sessionId: store().activeSessionId });
     },
     [send],
   );
 
   const setThinkingLevel = useCallback(
     (level: ThinkingLevel) => {
-      send({ type: "set_thinking_level", level });
-      setSession({ thinkingLevel: level });
+      send({ type: "set_thinking_level", level, sessionId: store().activeSessionId });
+      store().setActiveThinkingLevel(level);
     },
     [send],
   );
 
   const newSession = useCallback(
     (cwd?: string) => {
-      useChatStore.getState().clearMessages();
-      useChatStore.getState().clearToolExecutions();
-      setSession({ sessionId: null, sessionPath: null });
       send({ type: "new_session", cwd });
     },
     [send],
@@ -405,7 +391,7 @@ export function useAgent() {
 
   const listSessions = useCallback(
     (cwd?: string) => {
-      setSavedSessionsLoading(true);
+      store().setSavedSessionsLoading(true);
       send({ type: "list_persisted_sessions", cwd });
     },
     [send],
@@ -413,9 +399,31 @@ export function useAgent() {
 
   const switchSession = useCallback(
     (sessionPath: string) => {
-      useChatStore.getState().clearMessages();
-      useChatStore.getState().clearToolExecutions();
       send({ type: "switch_session", sessionPath });
+    },
+    [send],
+  );
+
+  const setActiveSession = useCallback(
+    (sessionId: string) => {
+      // Optimistically update the active session on the client
+      const s = store();
+      s.setActiveSessionId(sessionId);
+      const live = s.liveSessions.find((ls) => ls.id === sessionId);
+      if (live) {
+        s.setActiveModel(live.model);
+        s.setActiveSessionPath(live.sessionPath);
+        s.setActiveIsStreaming(live.isStreaming);
+      }
+      send({ type: "set_active_session", sessionId });
+    },
+    [send],
+  );
+
+  const closeSession = useCallback(
+    (sessionId: string) => {
+      store().removeSessionData(sessionId);
+      send({ type: "close_session", sessionId });
     },
     [send],
   );
@@ -428,7 +436,7 @@ export function useAgent() {
     try {
       const res = await fetch("/api/auth/status");
       const data = await res.json();
-      setAuthStatus(data.providers);
+      store().setAuthStatus(data.providers);
     } catch {
       // Ignore
     }
@@ -451,9 +459,67 @@ export function useAgent() {
     newSession,
     listSessions,
     switchSession,
+    setActiveSession,
+    closeSession,
     fetchModels,
     fetchAuthStatus,
   };
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
+function buildMessagesFromHistory(rawMessages: any[]): import("../lib/types").ChatMessage[] {
+  const msgs: import("../lib/types").ChatMessage[] = [];
+  for (const msg of rawMessages) {
+    if (msg.role === "user") {
+      msgs.push({
+        id: nextId(),
+        role: "user",
+        content: msg.content,
+        timestamp: msg.timestamp,
+      });
+    } else if (msg.role === "assistant") {
+      msgs.push({
+        id: nextId(),
+        role: "assistant",
+        content: msg.content,
+        timestamp: msg.timestamp,
+        model: msg.model,
+        thinkingContent: msg.thinkingContent,
+        isStreaming: false,
+      });
+      if (msg.toolCalls?.length) {
+        for (const tc of msg.toolCalls) {
+          msgs.push({
+            id: `tool-${tc.id}`,
+            role: "tool_call",
+            content: formatToolArgs(tc.name, tc.arguments ?? {}),
+            timestamp: msg.timestamp,
+            toolName: tc.name,
+            toolCallId: tc.id,
+          });
+        }
+      }
+    } else if (msg.role === "tool_result") {
+      msgs.push({
+        id: `toolresult-${msg.toolCallId ?? nextId()}`,
+        role: "tool_result",
+        content: msg.content,
+        timestamp: msg.timestamp,
+        toolName: msg.toolName,
+        toolCallId: msg.toolCallId,
+        isError: msg.isError,
+      });
+    } else if (msg.role === "system") {
+      msgs.push({
+        id: nextId(),
+        role: "system",
+        content: msg.content,
+        timestamp: msg.timestamp,
+      });
+    }
+  }
+  return msgs;
 }
 
 function formatToolArgs(toolName: string, args: Record<string, unknown>): string {

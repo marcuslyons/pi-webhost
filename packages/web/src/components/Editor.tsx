@@ -9,7 +9,7 @@ interface EditorProps {
 export function Editor({ onSend, onAbort }: EditorProps) {
   const [input, setInput] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const isStreaming = useChatStore((s) => s.session.isStreaming);
+  const isStreaming = useChatStore((s) => s.activeIsStreaming);
 
   const handleSubmit = useCallback(() => {
     const trimmed = input.trim();

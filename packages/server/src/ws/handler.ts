@@ -1,64 +1,125 @@
 /**
  * WebSocket handler that bridges Pi AgentSession events to the browser.
  *
- * Protocol:
- * - Client sends JSON commands (prompt, abort, set_model, etc.)
- * - Server streams Pi events as JSON
+ * Supports multiple concurrent sessions per WebSocket connection.
+ * Events from all sessions are forwarded, tagged with sessionId.
+ * Commands target the active session unless a sessionId is specified.
  */
 
-import type { WSContext, WSEvents, WSMessageReceive } from "hono/ws";
+import type { WSContext, WSEvents } from "hono/ws";
 import type { AgentManager, ManagedSession } from "../agent/manager.js";
 import type { ImageContent } from "@mariozechner/pi-ai";
 
 // Commands the client can send
 type ClientCommand =
-  | { type: "prompt"; message: string; images?: Array<{ data: string; mimeType: string }> }
-  | { type: "abort" }
-  | { type: "set_model"; provider: string; modelId: string }
-  | { type: "set_thinking_level"; level: string }
+  | { type: "prompt"; message: string; sessionId?: string; images?: Array<{ data: string; mimeType: string }> }
+  | { type: "abort"; sessionId?: string }
+  | { type: "set_model"; provider: string; modelId: string; sessionId?: string }
+  | { type: "set_thinking_level"; level: string; sessionId?: string }
   | { type: "get_state" }
-  | { type: "get_messages" }
+  | { type: "get_messages"; sessionId?: string }
   | { type: "get_models" }
-  | { type: "compact"; customInstructions?: string }
+  | { type: "compact"; customInstructions?: string; sessionId?: string }
   | { type: "new_session"; cwd?: string }
-  | { type: "steer"; message: string }
-  | { type: "follow_up"; message: string }
+  | { type: "steer"; message: string; sessionId?: string }
+  | { type: "follow_up"; message: string; sessionId?: string }
   | { type: "list_persisted_sessions"; cwd?: string }
-  | { type: "switch_session"; sessionPath: string };
+  | { type: "switch_session"; sessionPath: string }
+  | { type: "set_active_session"; sessionId: string }
+  | { type: "close_session"; sessionId: string };
 
 function send(ws: WSContext, data: unknown) {
   ws.send(JSON.stringify(data));
 }
 
 /**
+ * Per-connection state: tracks multiple live sessions and which one is active.
+ */
+interface ConnectionState {
+  sessions: Map<string, ManagedSession>;
+  unsubscribers: Map<string, () => void>;
+  activeSessionId: string | null;
+  ws: WSContext | undefined;
+}
+
+/**
  * Create WSEvents handlers for a WebSocket connection.
- * Called by Hono's upgradeWebSocket.
  */
 export function createWSHandlers(agentManager: AgentManager): WSEvents {
-  let managed: ManagedSession | undefined;
-  let unsubscribe: (() => void) | undefined;
-  let wsRef: WSContext | undefined;
+  const state: ConnectionState = {
+    sessions: new Map(),
+    unsubscribers: new Map(),
+    activeSessionId: null,
+    ws: undefined,
+  };
 
-  const setupEventForwarding = (session: ManagedSession) => {
-    if (unsubscribe) unsubscribe();
+  function setupEventForwarding(sessionId: string, managed: ManagedSession) {
+    // Remove previous subscription for this session
+    const prev = state.unsubscribers.get(sessionId);
+    if (prev) prev();
 
-    unsubscribe = session.session.subscribe((event) => {
-      if (!wsRef) return;
+    const unsub = managed.session.subscribe((event) => {
+      if (!state.ws) return;
       try {
-        send(wsRef, { type: "event", event: serializeEvent(event) });
+        send(state.ws, {
+          type: "event",
+          sessionId,
+          event: serializeEvent(event),
+        });
       } catch {
         // Client disconnected
       }
     });
-  };
+
+    state.unsubscribers.set(sessionId, unsub);
+  }
+
+  function sendSessionInfo(ws: WSContext, type: string, sessionId: string, managed: ManagedSession, extra?: Record<string, unknown>) {
+    send(ws, {
+      type,
+      sessionId,
+      sessionPath: managed.session.sessionFile ?? null,
+      model: managed.session.model
+        ? { provider: managed.session.model.provider, id: managed.session.model.id, name: managed.session.model.name }
+        : null,
+      ...extra,
+    });
+  }
+
+  function getTargetSession(sessionId?: string): { id: string; managed: ManagedSession } | null {
+    const id = sessionId ?? state.activeSessionId;
+    if (!id) return null;
+    const managed = state.sessions.get(id);
+    if (!managed) return null;
+    return { id, managed };
+  }
+
+  /** Send a snapshot of all live sessions to the client. */
+  function sendLiveSessionsList(ws: WSContext) {
+    const liveSessions = Array.from(state.sessions.entries()).map(([id, m]) => ({
+      id,
+      sessionPath: m.session.sessionFile ?? null,
+      cwd: m.cwd,
+      isStreaming: m.session.isStreaming,
+      model: m.session.model
+        ? { provider: m.session.model.provider, id: m.session.model.id, name: m.session.model.name }
+        : null,
+      messageCount: m.session.messages.length,
+    }));
+    send(ws, {
+      type: "live_sessions_update",
+      activeSessionId: state.activeSessionId,
+      sessions: liveSessions,
+    });
+  }
 
   return {
     onOpen(_evt, ws) {
-      wsRef = ws;
+      state.ws = ws;
     },
 
     async onMessage(evt, ws) {
-      wsRef = ws;
+      state.ws = ws;
       let cmd: ClientCommand;
       try {
         const raw = typeof evt.data === "string" ? evt.data : new TextDecoder().decode(evt.data as ArrayBuffer);
@@ -69,21 +130,23 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
       }
 
       try {
-        await handleCommand(cmd, ws, agentManager, () => managed, (m) => {
-          managed = m;
-          if (m) setupEventForwarding(m);
-        }, unsubscribe);
+        await handleCommand(cmd, ws, agentManager, state, setupEventForwarding, sendSessionInfo, getTargetSession, sendLiveSessionsList);
       } catch (err) {
         send(ws, { type: "error", message: String(err) });
       }
     },
 
     async onClose() {
-      if (unsubscribe) unsubscribe();
-      if (managed) {
-        await agentManager.destroySession(managed.id);
+      // Clean up all sessions for this connection
+      for (const [id, unsub] of state.unsubscribers) {
+        unsub();
       }
-      wsRef = undefined;
+      for (const [id] of state.sessions) {
+        await agentManager.destroySession(id);
+      }
+      state.sessions.clear();
+      state.unsubscribers.clear();
+      state.ws = undefined;
     },
   };
 }
@@ -92,25 +155,25 @@ async function handleCommand(
   cmd: ClientCommand,
   ws: WSContext,
   agentManager: AgentManager,
-  getManaged: () => ManagedSession | undefined,
-  setManaged: (m: ManagedSession) => void,
-  unsubscribe: (() => void) | undefined,
+  state: ConnectionState,
+  setupEventForwarding: (id: string, m: ManagedSession) => void,
+  sendSessionInfo: (ws: WSContext, type: string, id: string, m: ManagedSession, extra?: Record<string, unknown>) => void,
+  getTargetSession: (sessionId?: string) => { id: string; managed: ManagedSession } | null,
+  sendLiveSessionsList: (ws: WSContext) => void,
 ) {
-  let managed = getManaged();
-
   switch (cmd.type) {
     case "prompt": {
-      if (!managed) {
-        managed = await agentManager.createSession();
-        setManaged(managed);
-        send(ws, {
-          type: "session_created",
-          sessionId: managed.id,
-          sessionPath: managed.session.sessionFile ?? null,
-          model: managed.session.model
-            ? { provider: managed.session.model.provider, id: managed.session.model.id, name: managed.session.model.name }
-            : null,
-        });
+      let target = getTargetSession(cmd.sessionId);
+
+      if (!target) {
+        // Auto-create session on first prompt
+        const managed = await agentManager.createSession();
+        state.sessions.set(managed.id, managed);
+        state.activeSessionId = managed.id;
+        setupEventForwarding(managed.id, managed);
+        sendSessionInfo(ws, "session_created", managed.id, managed);
+        sendLiveSessionsList(ws);
+        target = { id: managed.id, managed };
       }
 
       const images: ImageContent[] | undefined = cmd.images?.length
@@ -122,40 +185,44 @@ async function handleCommand(
         : undefined;
 
       // Don't await — let it stream
-      managed.session.prompt(cmd.message, images ? { images } : undefined).catch((err) => {
-        send(ws, { type: "error", message: String(err) });
+      target.managed.session.prompt(cmd.message, images ? { images } : undefined).catch((err) => {
+        send(ws, { type: "error", sessionId: target!.id, message: String(err) });
       });
 
-      send(ws, { type: "response", command: "prompt", success: true });
+      send(ws, { type: "response", command: "prompt", success: true, sessionId: target.id });
       break;
     }
 
     case "abort": {
-      if (managed) {
-        await managed.session.abort();
+      const target = getTargetSession(cmd.sessionId);
+      if (target) {
+        await target.managed.session.abort();
       }
       send(ws, { type: "response", command: "abort", success: true });
       break;
     }
 
     case "steer": {
-      if (managed) {
-        await managed.session.steer(cmd.message);
+      const target = getTargetSession(cmd.sessionId);
+      if (target) {
+        await target.managed.session.steer(cmd.message);
       }
       send(ws, { type: "response", command: "steer", success: true });
       break;
     }
 
     case "follow_up": {
-      if (managed) {
-        await managed.session.followUp(cmd.message);
+      const target = getTargetSession(cmd.sessionId);
+      if (target) {
+        await target.managed.session.followUp(cmd.message);
       }
       send(ws, { type: "response", command: "follow_up", success: true });
       break;
     }
 
     case "set_model": {
-      if (!managed) {
+      const target = getTargetSession(cmd.sessionId);
+      if (!target) {
         send(ws, { type: "error", message: "No active session" });
         break;
       }
@@ -164,56 +231,54 @@ async function handleCommand(
         send(ws, { type: "error", message: `Model not found: ${cmd.provider}/${cmd.modelId}` });
         break;
       }
-      await managed.session.setModel(model);
+      await target.managed.session.setModel(model);
       send(ws, {
         type: "response",
         command: "set_model",
         success: true,
+        sessionId: target.id,
         data: { provider: model.provider, id: model.id, name: model.name },
       });
       break;
     }
 
     case "set_thinking_level": {
-      if (!managed) {
+      const target = getTargetSession(cmd.sessionId);
+      if (!target) {
         send(ws, { type: "error", message: "No active session" });
         break;
       }
-      managed.session.setThinkingLevel(cmd.level as any);
+      target.managed.session.setThinkingLevel(cmd.level as any);
       send(ws, { type: "response", command: "set_thinking_level", success: true });
       break;
     }
 
     case "get_state": {
-      if (!managed) {
-        send(ws, {
-          type: "response",
-          command: "get_state",
-          success: true,
-          data: { hasSession: false },
-        });
-        break;
-      }
+      const liveSessions = Array.from(state.sessions.entries()).map(([id, m]) => ({
+        id,
+        sessionPath: m.session.sessionFile ?? null,
+        isStreaming: m.session.isStreaming,
+        model: m.session.model
+          ? { provider: m.session.model.provider, id: m.session.model.id, name: m.session.model.name }
+          : null,
+        thinkingLevel: m.session.thinkingLevel,
+        messageCount: m.session.messages.length,
+      }));
       send(ws, {
         type: "response",
         command: "get_state",
         success: true,
         data: {
-          hasSession: true,
-          sessionId: managed.id,
-          isStreaming: managed.session.isStreaming,
-          model: managed.session.model
-            ? { provider: managed.session.model.provider, id: managed.session.model.id, name: managed.session.model.name }
-            : null,
-          thinkingLevel: managed.session.thinkingLevel,
-          messageCount: managed.session.messages.length,
+          activeSessionId: state.activeSessionId,
+          sessions: liveSessions,
         },
       });
       break;
     }
 
     case "get_messages": {
-      if (!managed) {
+      const target = getTargetSession(cmd.sessionId);
+      if (!target) {
         send(ws, { type: "response", command: "get_messages", success: true, data: { messages: [] } });
         break;
       }
@@ -221,7 +286,8 @@ async function handleCommand(
         type: "response",
         command: "get_messages",
         success: true,
-        data: { messages: managed.session.messages },
+        sessionId: target.id,
+        data: { messages: target.managed.session.messages },
       });
       break;
     }
@@ -246,31 +312,24 @@ async function handleCommand(
     }
 
     case "compact": {
-      if (!managed) {
+      const target = getTargetSession(cmd.sessionId);
+      if (!target) {
         send(ws, { type: "error", message: "No active session" });
         break;
       }
-      const result = await managed.session.compact(cmd.customInstructions);
+      const result = await target.managed.session.compact(cmd.customInstructions);
       send(ws, { type: "response", command: "compact", success: true, data: result });
       break;
     }
 
     case "new_session": {
-      if (managed) {
-        if (unsubscribe) unsubscribe();
-        await agentManager.destroySession(managed.id);
-      }
-
-      const newManaged = await agentManager.createSession({ cwd: cmd.cwd });
-      setManaged(newManaged);
-      send(ws, {
-        type: "session_created",
-        sessionId: newManaged.id,
-        sessionPath: newManaged.session.sessionFile ?? null,
-        model: newManaged.session.model
-          ? { provider: newManaged.session.model.provider, id: newManaged.session.model.id, name: newManaged.session.model.name }
-          : null,
-      });
+      // Create a new session WITHOUT destroying existing ones
+      const managed = await agentManager.createSession({ cwd: cmd.cwd });
+      state.sessions.set(managed.id, managed);
+      state.activeSessionId = managed.id;
+      setupEventForwarding(managed.id, managed);
+      sendSessionInfo(ws, "session_created", managed.id, managed);
+      sendLiveSessionsList(ws);
       break;
     }
 
@@ -286,17 +345,12 @@ async function handleCommand(
     }
 
     case "switch_session": {
-      // Destroy existing session
-      if (managed) {
-        if (unsubscribe) unsubscribe();
-        await agentManager.destroySession(managed.id);
-      }
-
-      // Open the persisted session
+      // Open a persisted session WITHOUT destroying existing ones
       const opened = await agentManager.openSession(cmd.sessionPath);
-      setManaged(opened);
+      state.sessions.set(opened.id, opened);
+      state.activeSessionId = opened.id;
+      setupEventForwarding(opened.id, opened);
 
-      // Convert session messages to a serializable format for the client
       const messages = opened.session.messages.map(serializeAgentMessage);
 
       send(ws, {
@@ -309,6 +363,48 @@ async function handleCommand(
         thinkingLevel: opened.session.thinkingLevel,
         messages,
       });
+      sendLiveSessionsList(ws);
+      break;
+    }
+
+    case "set_active_session": {
+      if (!state.sessions.has(cmd.sessionId)) {
+        send(ws, { type: "error", message: `Session not found: ${cmd.sessionId}` });
+        break;
+      }
+      state.activeSessionId = cmd.sessionId;
+      send(ws, {
+        type: "response",
+        command: "set_active_session",
+        success: true,
+        data: { activeSessionId: cmd.sessionId },
+      });
+      sendLiveSessionsList(ws);
+      break;
+    }
+
+    case "close_session": {
+      const unsub = state.unsubscribers.get(cmd.sessionId);
+      if (unsub) {
+        unsub();
+        state.unsubscribers.delete(cmd.sessionId);
+      }
+      state.sessions.delete(cmd.sessionId);
+      await agentManager.destroySession(cmd.sessionId);
+
+      // If we closed the active session, pick another or clear
+      if (state.activeSessionId === cmd.sessionId) {
+        const remaining = Array.from(state.sessions.keys());
+        state.activeSessionId = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+      }
+
+      send(ws, {
+        type: "response",
+        command: "close_session",
+        success: true,
+        data: { activeSessionId: state.activeSessionId },
+      });
+      sendLiveSessionsList(ws);
       break;
     }
 
@@ -330,11 +426,9 @@ function serializeEvent(event: any): any {
 
 /**
  * Convert a Pi AgentMessage into a simplified format for the client.
- * This is used when loading persisted sessions to rebuild the chat history.
  */
 function serializeAgentMessage(msg: any): any {
   if (msg.role === "user") {
-    // Extract text content
     const content = typeof msg.content === "string"
       ? msg.content
       : Array.isArray(msg.content)
@@ -400,7 +494,6 @@ function serializeAgentMessage(msg: any): any {
     };
   }
 
-  // Fallback for other message types (compaction summaries, etc.)
   return {
     role: "system",
     content: msg.content?.toString?.() ?? JSON.stringify(msg),
