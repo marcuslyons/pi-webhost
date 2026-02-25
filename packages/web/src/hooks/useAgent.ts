@@ -24,6 +24,8 @@ export function useAgent() {
     setToolExecution,
     setModels,
     setAuthStatus,
+    setSavedSessions,
+    setSavedSessionsLoading,
   } = useChatStore.getState();
 
   const connect = useCallback(() => {
@@ -68,8 +70,78 @@ export function useAgent() {
     if (data.type === "session_created") {
       setSession({
         sessionId: data.sessionId,
+        sessionPath: data.sessionPath ?? null,
         model: data.model,
       });
+      return;
+    }
+
+    if (data.type === "session_switched") {
+      const store = useChatStore.getState();
+      store.clearMessages();
+      store.clearToolExecutions();
+
+      setSession({
+        sessionId: data.sessionId,
+        sessionPath: data.sessionPath ?? null,
+        model: data.model,
+        thinkingLevel: data.thinkingLevel ?? "off",
+        isStreaming: false,
+      });
+
+      // Rebuild chat messages from the loaded session history
+      if (data.messages?.length) {
+        for (const msg of data.messages) {
+          if (msg.role === "user") {
+            addMessage({
+              id: nextId(),
+              role: "user",
+              content: msg.content,
+              timestamp: msg.timestamp,
+            });
+          } else if (msg.role === "assistant") {
+            addMessage({
+              id: nextId(),
+              role: "assistant",
+              content: msg.content,
+              timestamp: msg.timestamp,
+              model: msg.model,
+              thinkingContent: msg.thinkingContent,
+              isStreaming: false,
+            });
+            // Add tool calls as separate messages
+            if (msg.toolCalls?.length) {
+              for (const tc of msg.toolCalls) {
+                addMessage({
+                  id: `tool-${tc.id}`,
+                  role: "tool_call",
+                  content: formatToolArgs(tc.name, tc.arguments ?? {}),
+                  timestamp: msg.timestamp,
+                  toolName: tc.name,
+                  toolCallId: tc.id,
+                });
+              }
+            }
+          } else if (msg.role === "tool_result") {
+            addMessage({
+              id: `toolresult-${msg.toolCallId ?? nextId()}`,
+              role: "tool_result",
+              content: msg.content,
+              timestamp: msg.timestamp,
+              toolName: msg.toolName,
+              toolCallId: msg.toolCallId,
+              isError: msg.isError,
+            });
+          } else if (msg.role === "system") {
+            addMessage({
+              id: nextId(),
+              role: "system",
+              content: msg.content,
+              timestamp: msg.timestamp,
+            });
+          }
+        }
+      }
       return;
     }
 
@@ -90,6 +162,10 @@ export function useAgent() {
       }
       if (data.command === "set_model" && data.success) {
         setSession({ model: data.data });
+      }
+      if (data.command === "list_persisted_sessions" && data.success) {
+        setSavedSessions(data.data.sessions);
+        setSavedSessionsLoading(false);
       }
       return;
     }
@@ -321,7 +397,25 @@ export function useAgent() {
     (cwd?: string) => {
       useChatStore.getState().clearMessages();
       useChatStore.getState().clearToolExecutions();
+      setSession({ sessionId: null, sessionPath: null });
       send({ type: "new_session", cwd });
+    },
+    [send],
+  );
+
+  const listSessions = useCallback(
+    (cwd?: string) => {
+      setSavedSessionsLoading(true);
+      send({ type: "list_persisted_sessions", cwd });
+    },
+    [send],
+  );
+
+  const switchSession = useCallback(
+    (sessionPath: string) => {
+      useChatStore.getState().clearMessages();
+      useChatStore.getState().clearToolExecutions();
+      send({ type: "switch_session", sessionPath });
     },
     [send],
   );
@@ -355,6 +449,8 @@ export function useAgent() {
     setModel,
     setThinkingLevel,
     newSession,
+    listSessions,
+    switchSession,
     fetchModels,
     fetchAuthStatus,
   };

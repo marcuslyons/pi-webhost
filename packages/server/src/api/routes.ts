@@ -54,6 +54,17 @@ export function createApiRoutes(agentManager: AgentManager) {
     return c.json({ providers: status });
   });
 
+  // List persisted sessions from disk
+  api.get("/sessions/persisted", async (c) => {
+    try {
+      const cwd = c.req.query("cwd") ?? undefined;
+      const sessions = await agentManager.listPersistedSessions(cwd);
+      return c.json({ sessions });
+    } catch (err) {
+      return c.json({ error: String(err) }, 500);
+    }
+  });
+
   // Set a runtime API key (not persisted to disk)
   api.post("/auth/api-key", async (c) => {
     try {

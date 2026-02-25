@@ -104,6 +104,62 @@ export class AgentManager {
     }
   }
 
+  /**
+   * Open an existing persisted session by file path.
+   */
+  async openSession(sessionPath: string, options?: {
+    sessionId?: string;
+  }): Promise<ManagedSession> {
+    const id = options?.sessionId ?? nanoid();
+    // Derive cwd from SessionManager.open if possible, default to process.cwd()
+    const cwd = process.cwd();
+
+    const settingsManager = SettingsManager.create(cwd);
+
+    const resourceLoader = new DefaultResourceLoader({
+      cwd,
+      settingsManager,
+    });
+    await resourceLoader.reload();
+
+    const { session } = await createAgentSession({
+      cwd,
+      authStorage: this.authStorage,
+      modelRegistry: this.modelRegistry,
+      resourceLoader,
+      sessionManager: SessionManager.open(sessionPath),
+      settingsManager,
+    });
+
+    const managed: ManagedSession = {
+      id,
+      session,
+      cwd,
+      createdAt: new Date(),
+    };
+
+    this.sessions.set(id, managed);
+    return managed;
+  }
+
+  /**
+   * List persisted sessions from disk for a given cwd.
+   */
+  async listPersistedSessions(cwd?: string) {
+    const dir = cwd ?? process.cwd();
+    const sessions = await SessionManager.list(dir);
+    return sessions.map((s) => ({
+      path: s.path,
+      id: s.id,
+      cwd: s.cwd,
+      name: s.name,
+      created: s.created.toISOString(),
+      modified: s.modified.toISOString(),
+      messageCount: s.messageCount,
+      firstMessage: s.firstMessage,
+    }));
+  }
+
   async getAvailableModels() {
     return this.modelRegistry.getAvailable();
   }

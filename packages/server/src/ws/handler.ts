@@ -22,7 +22,9 @@ type ClientCommand =
   | { type: "compact"; customInstructions?: string }
   | { type: "new_session"; cwd?: string }
   | { type: "steer"; message: string }
-  | { type: "follow_up"; message: string };
+  | { type: "follow_up"; message: string }
+  | { type: "list_persisted_sessions"; cwd?: string }
+  | { type: "switch_session"; sessionPath: string };
 
 function send(ws: WSContext, data: unknown) {
   ws.send(JSON.stringify(data));
@@ -104,6 +106,7 @@ async function handleCommand(
         send(ws, {
           type: "session_created",
           sessionId: managed.id,
+          sessionPath: managed.session.sessionFile ?? null,
           model: managed.session.model
             ? { provider: managed.session.model.provider, id: managed.session.model.id, name: managed.session.model.name }
             : null,
@@ -263,9 +266,48 @@ async function handleCommand(
       send(ws, {
         type: "session_created",
         sessionId: newManaged.id,
+        sessionPath: newManaged.session.sessionFile ?? null,
         model: newManaged.session.model
           ? { provider: newManaged.session.model.provider, id: newManaged.session.model.id, name: newManaged.session.model.name }
           : null,
+      });
+      break;
+    }
+
+    case "list_persisted_sessions": {
+      const sessions = await agentManager.listPersistedSessions(cmd.cwd);
+      send(ws, {
+        type: "response",
+        command: "list_persisted_sessions",
+        success: true,
+        data: { sessions },
+      });
+      break;
+    }
+
+    case "switch_session": {
+      // Destroy existing session
+      if (managed) {
+        if (unsubscribe) unsubscribe();
+        await agentManager.destroySession(managed.id);
+      }
+
+      // Open the persisted session
+      const opened = await agentManager.openSession(cmd.sessionPath);
+      setManaged(opened);
+
+      // Convert session messages to a serializable format for the client
+      const messages = opened.session.messages.map(serializeAgentMessage);
+
+      send(ws, {
+        type: "session_switched",
+        sessionId: opened.id,
+        sessionPath: opened.session.sessionFile ?? cmd.sessionPath,
+        model: opened.session.model
+          ? { provider: opened.session.model.provider, id: opened.session.model.id, name: opened.session.model.name }
+          : null,
+        thinkingLevel: opened.session.thinkingLevel,
+        messages,
       });
       break;
     }
@@ -284,4 +326,84 @@ function serializeEvent(event: any): any {
   } catch {
     return { type: event.type, error: "Failed to serialize event" };
   }
+}
+
+/**
+ * Convert a Pi AgentMessage into a simplified format for the client.
+ * This is used when loading persisted sessions to rebuild the chat history.
+ */
+function serializeAgentMessage(msg: any): any {
+  if (msg.role === "user") {
+    // Extract text content
+    const content = typeof msg.content === "string"
+      ? msg.content
+      : Array.isArray(msg.content)
+        ? msg.content
+            .filter((c: any) => c.type === "text")
+            .map((c: any) => c.text)
+            .join("\n")
+        : "";
+    return {
+      role: "user",
+      content,
+      timestamp: msg.timestamp ?? Date.now(),
+    };
+  }
+
+  if (msg.role === "assistant") {
+    let textContent = "";
+    let thinkingContent = "";
+    const toolCalls: any[] = [];
+
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === "text") {
+          textContent += block.text;
+        } else if (block.type === "thinking") {
+          thinkingContent += block.thinking;
+        } else if (block.type === "toolCall") {
+          toolCalls.push({
+            id: block.id,
+            name: block.name,
+            arguments: block.arguments,
+          });
+        }
+      }
+    }
+
+    return {
+      role: "assistant",
+      content: textContent,
+      thinkingContent: thinkingContent || undefined,
+      model: msg.model,
+      timestamp: msg.timestamp ?? Date.now(),
+      toolCalls,
+    };
+  }
+
+  if (msg.role === "toolResult") {
+    const resultText = Array.isArray(msg.content)
+      ? msg.content
+          .filter((c: any) => c.type === "text")
+          .map((c: any) => c.text)
+          .join("\n")
+      : typeof msg.content === "string"
+        ? msg.content
+        : "";
+    return {
+      role: "tool_result",
+      content: resultText,
+      toolCallId: msg.toolCallId,
+      toolName: msg.toolName,
+      isError: msg.isError,
+      timestamp: msg.timestamp ?? Date.now(),
+    };
+  }
+
+  // Fallback for other message types (compaction summaries, etc.)
+  return {
+    role: "system",
+    content: msg.content?.toString?.() ?? JSON.stringify(msg),
+    timestamp: msg.timestamp ?? Date.now(),
+  };
 }

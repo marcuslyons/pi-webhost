@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   ChatMessage,
   ModelInfo,
+  SavedSessionInfo,
   SessionState,
   ThinkingLevel,
   ToolExecution,
@@ -31,6 +32,12 @@ interface ChatStore {
   models: ModelInfo[];
   setModels: (models: ModelInfo[]) => void;
 
+  // Saved sessions
+  savedSessions: SavedSessionInfo[];
+  setSavedSessions: (sessions: SavedSessionInfo[]) => void;
+  savedSessionsLoading: boolean;
+  setSavedSessionsLoading: (loading: boolean) => void;
+
   // Auth status
   authStatus: Record<string, { hasCredentials: boolean }>;
   setAuthStatus: (status: Record<string, { hasCredentials: boolean }>) => void;
@@ -48,6 +55,7 @@ export const useChatStore = create<ChatStore>((set) => ({
   // Session
   session: {
     sessionId: null,
+    sessionPath: null,
     isStreaming: false,
     model: null,
     thinkingLevel: "off" as ThinkingLevel,
@@ -80,6 +88,12 @@ export const useChatStore = create<ChatStore>((set) => ({
   // Models
   models: [],
   setModels: (models) => set({ models }),
+
+  // Saved sessions
+  savedSessions: [],
+  setSavedSessions: (savedSessions) => set({ savedSessions }),
+  savedSessionsLoading: false,
+  setSavedSessionsLoading: (savedSessionsLoading) => set({ savedSessionsLoading }),
 
   // Auth
   authStatus: {},

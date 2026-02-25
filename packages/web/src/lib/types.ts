@@ -47,7 +47,19 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
 
 export interface SessionState {
   sessionId: string | null;
+  sessionPath: string | null;
   isStreaming: boolean;
   model: ModelInfo | null;
   thinkingLevel: ThinkingLevel;
+}
+
+export interface SavedSessionInfo {
+  path: string;
+  id: string;
+  cwd: string;
+  name?: string;
+  created: string; // ISO date
+  modified: string; // ISO date
+  messageCount: number;
+  firstMessage: string;
 }
