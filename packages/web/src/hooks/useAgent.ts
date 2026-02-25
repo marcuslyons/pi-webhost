@@ -32,6 +32,7 @@ export function useAgent() {
       store().setConnected(true);
       fetchModels();
       fetchAuthStatus();
+      fetchServerInfo();
     };
 
     ws.onclose = () => {
@@ -63,6 +64,7 @@ export function useAgent() {
       s.setActiveSessionId(sid);
       s.setActiveModel(data.model);
       s.setActiveSessionPath(data.sessionPath ?? null);
+      s.setActiveCwd(data.cwd ?? null);
       s.setActiveIsStreaming(false);
       return;
     }
@@ -73,6 +75,7 @@ export function useAgent() {
       s.setActiveSessionId(sid);
       s.setActiveModel(data.model);
       s.setActiveSessionPath(data.sessionPath ?? null);
+      s.setActiveCwd(data.cwd ?? null);
       s.setActiveThinkingLevel(data.thinkingLevel ?? "off");
       s.setActiveIsStreaming(false);
 
@@ -117,11 +120,11 @@ export function useAgent() {
       if (data.command === "set_active_session" && data.success) {
         const newActiveId = data.data.activeSessionId;
         s.setActiveSessionId(newActiveId);
-        // Update active session state from live sessions
         const live = s.liveSessions.find((ls) => ls.id === newActiveId);
         if (live) {
           s.setActiveModel(live.model);
           s.setActiveSessionPath(live.sessionPath);
+          s.setActiveCwd(live.cwd);
           s.setActiveIsStreaming(live.isStreaming);
         }
       }
@@ -413,6 +416,7 @@ export function useAgent() {
       if (live) {
         s.setActiveModel(live.model);
         s.setActiveSessionPath(live.sessionPath);
+        s.setActiveCwd(live.cwd);
         s.setActiveIsStreaming(live.isStreaming);
       }
       send({ type: "set_active_session", sessionId });
@@ -437,6 +441,16 @@ export function useAgent() {
       const res = await fetch("/api/auth/status");
       const data = await res.json();
       store().setAuthStatus(data.providers);
+    } catch {
+      // Ignore
+    }
+  }, []);
+
+  const fetchServerInfo = useCallback(async () => {
+    try {
+      const res = await fetch("/api/cwd");
+      const data = await res.json();
+      store().setServerInfo(data.cwd, data.home);
     } catch {
       // Ignore
     }

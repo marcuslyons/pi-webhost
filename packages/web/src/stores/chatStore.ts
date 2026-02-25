@@ -57,8 +57,15 @@ interface ChatStore {
   setActiveThinkingLevel: (level: ThinkingLevel) => void;
   activeSessionPath: string | null;
   setActiveSessionPath: (path: string | null) => void;
+  activeCwd: string | null;
+  setActiveCwd: (cwd: string | null) => void;
   activeIsStreaming: boolean;
   setActiveIsStreaming: (streaming: boolean) => void;
+
+  // Server info
+  serverCwd: string | null;
+  serverHome: string | null;
+  setServerInfo: (cwd: string, home: string) => void;
 
   // Available models (global)
   models: ModelInfo[];
@@ -173,8 +180,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setActiveThinkingLevel: (activeThinkingLevel) => set({ activeThinkingLevel }),
   activeSessionPath: null,
   setActiveSessionPath: (activeSessionPath) => set({ activeSessionPath }),
+  activeCwd: null,
+  setActiveCwd: (activeCwd) => set({ activeCwd }),
   activeIsStreaming: false,
   setActiveIsStreaming: (activeIsStreaming) => set({ activeIsStreaming }),
+
+  // Server info
+  serverCwd: null,
+  serverHome: null,
+  setServerInfo: (serverCwd, serverHome) => set({ serverCwd, serverHome }),
 
   // Models
   models: [],

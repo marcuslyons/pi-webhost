@@ -3,6 +3,9 @@
  */
 
 import { Hono } from "hono";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { homedir } from "node:os";
 import type { AgentManager } from "../agent/manager.js";
 
 export function createApiRoutes(agentManager: AgentManager) {
@@ -52,6 +55,35 @@ export function createApiRoutes(agentManager: AgentManager) {
     }
 
     return c.json({ providers: status });
+  });
+
+  // Server's default cwd and home directory
+  api.get("/cwd", (c) => {
+    return c.json({
+      cwd: process.cwd(),
+      home: homedir(),
+    });
+  });
+
+  // Validate a directory path
+  api.get("/validate-path", (c) => {
+    const path = c.req.query("path");
+    if (!path) {
+      return c.json({ valid: false, error: "No path provided" });
+    }
+    try {
+      const resolved = resolve(path.replace(/^~/, homedir()));
+      if (!existsSync(resolved)) {
+        return c.json({ valid: false, resolved, error: "Path does not exist" });
+      }
+      const stat = statSync(resolved);
+      if (!stat.isDirectory()) {
+        return c.json({ valid: false, resolved, error: "Path is not a directory" });
+      }
+      return c.json({ valid: true, resolved });
+    } catch (err) {
+      return c.json({ valid: false, error: String(err) });
+    }
   });
 
   // List persisted sessions from disk

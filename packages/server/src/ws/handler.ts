@@ -79,6 +79,7 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
       type,
       sessionId,
       sessionPath: managed.session.sessionFile ?? null,
+      cwd: managed.cwd,
       model: managed.session.model
         ? { provider: managed.session.model.provider, id: managed.session.model.id, name: managed.session.model.name }
         : null,
@@ -357,6 +358,7 @@ async function handleCommand(
         type: "session_switched",
         sessionId: opened.id,
         sessionPath: opened.session.sessionFile ?? cmd.sessionPath,
+        cwd: opened.cwd,
         model: opened.session.model
           ? { provider: opened.session.model.provider, id: opened.session.model.id, name: opened.session.model.name }
           : null,

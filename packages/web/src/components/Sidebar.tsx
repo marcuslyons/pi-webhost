@@ -244,7 +244,9 @@ function SessionsTab({
                         {session.model?.name ?? "No model"}
                       </span>
                     </div>
-                    <span className="text-[10px] text-zinc-600 pl-4">
+                    <span className="text-[10px] text-zinc-600 pl-4 truncate">
+                      {shortenCwd(session.cwd)}
+                      {" · "}
                       {session.messageCount} msg{session.messageCount !== 1 ? "s" : ""}
                       {session.isStreaming ? " · streaming" : ""}
                     </span>
@@ -456,6 +458,14 @@ function truncateMessage(msg: string, maxLen = 60): string {
   const cleaned = msg.replace(/\n/g, " ").trim();
   if (cleaned.length <= maxLen) return cleaned;
   return cleaned.slice(0, maxLen) + "…";
+}
+
+function shortenCwd(cwd: string): string {
+  if (!cwd) return "";
+  // Show just the last 2 path segments
+  const parts = cwd.split("/").filter(Boolean);
+  if (parts.length <= 2) return cwd;
+  return "…/" + parts.slice(-2).join("/");
 }
 
 function formatRelativeTime(date: Date): string {
