@@ -64,13 +64,15 @@ const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
 injectWebSocket(server);
 
 // Graceful shutdown
-process.on("SIGINT", () => {
+function shutdown() {
   console.log("\nShutting down...");
   agentManager.dispose();
-  process.exit(0);
-});
+  server.close(() => {
+    process.exit(0);
+  });
+  // Force exit if close hangs (e.g. open WebSocket connections)
+  setTimeout(() => process.exit(0), 2000).unref();
+}
 
-process.on("SIGTERM", () => {
-  agentManager.dispose();
-  process.exit(0);
-});
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
