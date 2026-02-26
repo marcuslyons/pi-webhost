@@ -1,6 +1,6 @@
-# PRD-001: Session Telemetry, Directory Autocomplete, Session Persistence
+# PRD-001: Session Telemetry, Directory Autocomplete, Server-Owned Sessions
 
-Three features that bring pi-webhost closer to the Pi terminal experience and improve usability for multi-session workflows.
+Three features that bring pi-webhost closer to the Pi terminal experience and enable multi-device workflows.
 
 ---
 
@@ -122,71 +122,193 @@ Only return directories (not files) — this is a directory picker. Limit result
 
 ---
 
-## Feature 3: Session Persistence Across Server Restarts
+## Feature 3: Server-Owned Sessions (Multi-Device, Persistence, Detach/Attach)
 
 ### Problem
 
-When the pi-webhost server shuts down (intentional or crash), all live WebSocket connections drop and all in-memory `ManagedSession` instances are destroyed. The browser shows "Connecting to server..." and when it reconnects, it's a blank slate. The user loses their active session context even though Pi persisted the session to disk.
+The current architecture ties sessions to WebSocket connections. When a connection drops — browser closed, laptop lid shut, network blip — the server destroys the session. This makes multi-device usage impossible and means even temporary disconnects lose state.
 
-### What Actually Survives a Restart
+The target use case: pi-webhost runs on a Mac Mini on the home network. Start a long-running task from the laptop, close the laptop, pick it up on the phone while away, come back to the laptop later and continue. The agent keeps working regardless of which device (if any) is connected.
 
-Pi's `SessionManager` writes session data to JSONL files in `~/.pi/agent/sessions/`. These files contain the full message history, tool calls, results, and compaction entries. They survive server restarts. The `SessionManager.list()` and `SessionManager.open()` APIs can enumerate and reopen them.
+### Fundamental Architecture Change
 
-**What's lost**: The `AgentSession` runtime state — the subscribed event listeners, the in-flight streaming, any queued steer/follow-up messages, and the model selection if it differs from settings defaults.
+Sessions must be **server-owned**, not **connection-owned**.
+
+Current model:
+```
+WebSocket connects → session created → session lives in connection state
+WebSocket disconnects → session destroyed
+```
+
+Target model:
+```
+Server manages a session pool (independent of connections)
+WebSocket connects → client attaches to session(s) as a viewer/controller
+WebSocket disconnects → client detaches, session keeps running
+Agent completes work → results persisted, available when any client attaches
+```
+
+This is the single biggest architectural change in pi-webhost. Everything else (restart survival, multi-device) falls out of it naturally.
+
+### What Pi Gives Us
+
+Pi's `SessionManager` already persists all session data to JSONL files in `~/.pi/agent/sessions/`. Full message history, tool calls, results, and compaction entries survive anything.
+
+`AgentSession` instances are the runtime objects that hold the LLM connection, tool execution, and event subscriptions. These live in memory and are lost on process death. But they can be reconstructed from the persisted session file via `SessionManager.open(path)`.
+
+Key insight: the agent loop (`session.prompt()`) is an async operation that runs server-side. It doesn't need a WebSocket client to be connected. It just needs the `AgentSession` to exist in memory.
 
 ### Requirements
 
-**R1: Auto-reconnect with session restoration** — when the WebSocket reconnects after a disconnect:
-1. Client sends a `restore_sessions` command with a list of `{ sessionPath, wasActive }` for each session it had open
-2. Server reopens each session via `SessionManager.open(path)`
-3. Server sends back `session_restored` events with the session ID mappings and current message state
-4. Client matches restored sessions to its cached data and resumes
+**R1: Session pool** — the server maintains a `Map<sessionId, ManagedSession>` at the `AgentManager` level, not per-connection. Sessions are created, run, and persist independently of any WebSocket connection.
 
-**R2: Client-side session memory** — the client already caches messages per session in `sessionDataMap`. On reconnect, it doesn't need to re-fetch messages it already has. The restore flow should:
-- Reopen the session on the server so new prompts work
-- NOT resend all messages (client already has them)
-- Send a `stats_update` so the footer is accurate
-- Re-establish event forwarding so new events flow
+**R2: Attach/detach model** — WebSocket connections don't own sessions. Instead:
+- `attach_session { sessionId }` — start receiving events for a session. Multiple clients can attach to the same session simultaneously.
+- `detach_session { sessionId }` — stop receiving events. Session keeps running.
+- `detach_all` (implicit on WebSocket close) — client goes away, all sessions continue.
 
-**R3: Server-side session registry** — optional enhancement: the server maintains a lightweight JSON file (`~/.pi/agent/pi-webhost-state.json` or similar) that tracks which sessions were active. On startup, the server can pre-load this list and offer it to reconnecting clients. This handles the case where the browser was also closed (no client-side cache).
+**R3: Background execution** — when a prompt is running and no client is attached, the agent keeps working. Events are generated and persisted (Pi handles this via SessionManager). When a client attaches later, it loads the current state from `session.messages`.
 
-**R4: Graceful degradation** — if a session can't be restored (file deleted, corrupted), the client should show a notification and remove it from the live sessions list. Don't block other sessions from restoring.
+**R4: Multi-client support** — two devices attached to the same session both receive real-time events. Both can send prompts. The session handles this like the terminal Pi handles message queuing — steering and follow-up messages work the same way. No conflict resolution needed because Pi's agent loop is sequential (one turn at a time).
 
-**R5: In-flight work** — if a session was mid-stream when the server died, that work is lost. The restored session picks up from the last completed turn. The client should detect if a session was streaming when disconnected and show a notice: "Session was interrupted. Last completed message shown."
+**R5: Server restart recovery** — the server writes an active session manifest to disk (`~/.pi/agent/pi-webhost/active-sessions.json`):
+```json
+{
+  "sessions": [
+    {
+      "sessionPath": "/path/to/session.jsonl",
+      "cwd": "/Users/marcus/project",
+      "model": { "provider": "anthropic", "id": "claude-sonnet-4-..." },
+      "thinkingLevel": "medium"
+    }
+  ]
+}
+```
+On startup, the server reopens all sessions from this manifest. Reconnecting clients find them already running.
 
-### Architecture Options
+**R6: Client reconnect flow** — when a client reconnects (WebSocket open after disconnect):
+1. Client sends `list_active_sessions` to get the server's session pool
+2. Server responds with all active sessions: `{ sessionId, sessionPath, cwd, model, isStreaming, messageCount }`
+3. Client matches against its locally cached sessions (in localStorage or memory)
+4. Client sends `attach_session` for each session it wants to follow
+5. If the client has no cache (new device), it sends `get_messages { sessionId }` to load history
 
-**Option A: Client-driven restore (recommended for v1)**
-- Client stores `activeSessionPaths` in localStorage
-- On WebSocket reconnect, client sends `restore_sessions` with the paths
-- Server opens each one, sends back the session IDs
-- Simple, no server-side persistence needed beyond what Pi already does
-- Limitation: only works if the same browser tab reconnects
+**R7: Session lifecycle** — sessions are explicitly closed by the user (`close_session`), not by disconnects. Idle sessions (no prompts for X hours) could be automatically closed to free memory, with a configurable timeout. Closed sessions remain on disk and can be reopened.
 
-**Option B: Server-side state file**
-- Server writes `{ activeSessions: [{ path, cwd, model, thinkingLevel }] }` to a JSON file on every session change
-- On startup, server reads this file and pre-opens sessions
-- Reconnecting client gets the sessions immediately
-- Works even if the browser was closed and reopened
-- More complex, introduces a new state file to manage
+**R8: Interrupted streams** — if the server dies mid-stream, the `AgentSession` is lost. On restart, the session is reopened from disk at the last completed turn. The client should detect this: if a session was `isStreaming: true` before disconnect and `isStreaming: false` after reconnect with no new messages, show: "Session was interrupted. Showing last completed state."
 
-**Option C: SQLite session index**
-- Overkill for this use case. The session data is already in JSONL files managed by Pi's SessionManager. Adding SQLite creates a second source of truth and sync headaches.
+### Architecture
 
-### Implementation Notes
+#### Server Changes
 
-- The reconnect logic already exists (`reconnectTimer` in the WebSocket client). The gap is that after reconnecting, nothing happens — it's a fresh connection.
-- `SessionManager.open(path)` is the key API — it loads the full session from disk. It's already used by `switch_session`.
-- For Option A, the client can store paths in localStorage: `localStorage.setItem('pi-webhost:activeSessions', JSON.stringify([...]))`
-- The new `restore_sessions` WS command is essentially a batch `switch_session` — open multiple sessions at once, set the active one, and send back session info for each.
-- The `session_restored` response per session should include: `sessionId`, `sessionPath`, `cwd`, `model`, `thinkingLevel`, `messageCount` (so the client knows if it needs to fetch messages or if its cache is sufficient).
+**`AgentManager` becomes the session pool owner:**
+```
+AgentManager
+├── sessions: Map<string, ManagedSession>    // THE pool, lives here
+├── subscribers: Map<string, Set<WSContext>>  // sessionId → connected clients
+├── manifest: ActiveSessionManifest          // persisted to disk
+│
+├── createSession(cwd) → ManagedSession
+├── openSession(path) → ManagedSession
+├── closeSession(id)                         // destroy + remove from manifest
+│
+├── attachClient(sessionId, ws)              // add to subscribers
+├── detachClient(sessionId, ws)              // remove from subscribers
+├── detachAllForClient(ws)                   // on WS close
+│
+├── broadcastEvent(sessionId, event)         // send to all attached clients
+└── saveManifest() / loadManifest()          // disk persistence
+```
+
+**`ws/handler.ts` becomes thin:**
+- `ConnectionState` no longer holds sessions — just tracks which sessions this client is attached to
+- `onClose` calls `agentManager.detachAllForClient(ws)` instead of destroying sessions
+- Commands like `prompt`, `abort`, `set_model` route through `agentManager` which finds the session by ID
+- Event forwarding is set up in `AgentManager.attachClient()`, not per-connection
+
+**Event subscription moves to AgentManager:**
+- When a session is created, `AgentManager` subscribes to its events once
+- Events are broadcast to all attached clients via `subscribers.get(sessionId)`
+- No re-subscribing on attach/detach — the subscription is permanent for the session's lifetime
+
+**Manifest file:**
+- Written on every session create/close/model change (debounced, async)
+- Read on server startup
+- Location: `~/.pi/agent/pi-webhost/active-sessions.json`
+- If the file is missing or corrupt, start with an empty pool (sessions can still be opened from Pi's session files)
+
+#### Client Changes
+
+**Connection lifecycle:**
+```
+WebSocket opens
+  → send list_active_sessions
+  → receive session list
+  → match against localStorage cache
+  → attach to sessions
+  → load messages for any sessions not in cache
+  → resume UI
+```
+
+**localStorage schema:**
+```json
+{
+  "attachedSessions": [
+    { "sessionPath": "...", "activeSessionPath": "..." }
+  ],
+  "activeSessionPath": "..."
+}
+```
+
+This is lightweight — just enough to know what to reattach to. The actual message cache is in memory (`sessionDataMap`) and repopulated from the server on new page loads.
+
+**Multi-device scenario:**
+```
+Laptop: attach to session A → send prompt → see streaming
+Phone:  connect → list_active_sessions → sees session A (streaming)
+        → attach to session A → starts receiving events mid-stream
+        → can send follow_up while laptop also watches
+Laptop: close lid → detach (implicit) → session A continues
+Phone:  still attached → still seeing events
+        → agent finishes → send new prompt from phone
+Laptop: open lid → reconnect → reattach → see everything phone did
+```
+
+### Migration Path
+
+This is a breaking change to the WebSocket handler and AgentManager. Suggested phased approach:
+
+**Phase 1: Move session pool to AgentManager**
+- `AgentManager` owns the session `Map`, not `ConnectionState`
+- `onClose` stops destroying sessions (just detaches)
+- Sessions without attached clients idle but stay alive
+- Single-client still works exactly as before
+- No manifest yet — sessions lost on restart
+
+**Phase 2: Add attach/detach protocol**
+- New commands: `attach_session`, `detach_session`, `list_active_sessions`
+- `broadcastEvent` sends to all attached clients
+- Multi-client works
+
+**Phase 3: Manifest persistence**
+- Write `active-sessions.json` on session changes
+- Read on startup, reopen sessions
+- Restart recovery works
+
+**Phase 4: Client reconnect flow**
+- localStorage tracking of attached sessions
+- Auto-reattach on reconnect
+- Message catch-up for stale caches
+- Multi-device works end-to-end
 
 ### Open Questions
 
-- Should we restore the model selection? If the user picked a model that's no longer available (API key removed), we need a fallback.
-- Should session restore be automatic or require a user action (e.g., "Restore previous sessions?" prompt)?
-- How do we handle multiple browser tabs? If two tabs both try to restore the same session, they'd create duplicate `AgentSession` instances operating on the same JSONL file. Pi's file locking might handle this, but it needs testing.
-- Is there value in a "session bookmark" concept — explicitly marking sessions to survive restarts vs. ephemeral sessions that are discarded?
+- **Session limits**: should there be a max number of active sessions? Memory scales with session count (each `AgentSession` holds full message history). A limit of 10-20 active sessions seems reasonable.
+- **Idle timeout**: auto-close sessions after N hours of no prompts? Or keep them alive indefinitely until explicit close? Leaning toward a configurable timeout (default: 24h) with a "pin" option to exempt specific sessions.
+- **Concurrent prompts**: two devices both send a prompt to the same session at the same time. Pi's agent loop is sequential, so the second prompt would queue as a follow-up. Is that the right behavior, or should we lock the session to one prompter at a time?
+- **Device identification**: should clients identify themselves (device name, browser ID) so the UI can show "Laptop is also viewing this session"? Nice for awareness, not strictly necessary.
+- **Security**: if this is on a home network, auth is probably unnecessary. But if exposed beyond LAN (tailscale, etc.), we'd want some form of authentication. Out of scope for this PRD but worth noting.
+- **Event buffering vs. replay**: when a new client attaches to a streaming session, should it receive buffered events from the current turn (partial text), or just start receiving from the current point? Getting partial state right (mid-stream text already generated) requires either buffering or reading from `session.messages` which includes the in-progress assistant message.
 
 ---
 
@@ -194,8 +316,12 @@ Pi's `SessionManager` writes session data to JSONL files in `~/.pi/agent/session
 
 | Feature | Impact | Effort | Suggested Order |
 |---------|--------|--------|-----------------|
-| Session Telemetry | High — core visibility gap | Medium | 1st |
-| Directory Autocomplete | Medium — QoL improvement | Low-Medium | 2nd |
-| Session Persistence | High — critical for reliability | Medium-High | 3rd |
+| Server-Owned Sessions | Critical — enables everything else | High | 1st |
+| Session Telemetry | High — core visibility gap | Medium | 2nd |
+| Directory Autocomplete | Medium — QoL improvement | Low-Medium | 3rd |
 
-Telemetry first because the data is already available and the feature is self-contained. Directory autocomplete second because it's small and independent. Session persistence last because it touches the reconnect flow and needs the most design decisions.
+Server-owned sessions first. It's the largest change and everything else benefits from it: telemetry is more useful when sessions persist across devices, and the attach/detach model makes reconnect handling clean. The phased migration path (pool → attach/detach → manifest → client reconnect) means each phase is shippable on its own.
+
+Telemetry second because the data is already available and the feature is self-contained.
+
+Directory autocomplete third — small, independent, can land any time.
