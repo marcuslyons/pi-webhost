@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="packages/web/public/pi.svg" alt="pi-webhost" width="64">
+  <img src="packages/web/public/logo.svg" alt="pi-webhost" width="64">
 </p>
 
 <h1 align="center">pi-webhost</h1>
