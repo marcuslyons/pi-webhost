@@ -163,15 +163,14 @@ NODE_ENV=production npm start    # Serves frontend on port 3141
 
 ## Roadmap
 
-Tracked in [`docs/prds/`](docs/prds/) and [`docs/plans/`](docs/plans/).
+See **[ROADMAP.md](ROADMAP.md)** for the full picture. The short version:
 
-**Server-owned sessions** — The big one. Sessions currently die when the browser disconnects. The plan is to move session ownership to the server so sessions survive client disconnects, server restarts, and device switches. Start from laptop, continue from phone. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
+1. **Server-owned sessions** — sessions survive client disconnects and device switches (the multi-device story)
+2. **Session telemetry** — token counts, cost, context % in the UI
+3. **Directory autocomplete** — predictive path input for new sessions
+4. **Svelte 5 migration** — replace React + Zustand with Svelte runes
 
-**Session telemetry** — Token counts (↑↓), cache stats (R/W), cost, context window percentage. The data is already available via `session.getSessionStats()` and `session.getContextUsage()` — just needs a UI. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
-
-**Directory autocomplete** — Predictive path completion when creating new sessions. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
-
-**Svelte migration** — Replace React + Zustand with Svelte 5 runes. Server untouched. 12-task plan in [`docs/plans/svelte-migration.md`](docs/plans/svelte-migration.md).
+PRDs in [`docs/prds/`](docs/prds/), task plans in [`docs/plans/`](docs/plans/).
 
 ## What This Isn't
 
