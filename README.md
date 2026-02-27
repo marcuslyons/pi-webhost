@@ -1,21 +1,37 @@
-# pi-webhost
+<p align="center">
+  <img src="packages/web/public/pi.svg" alt="pi-webhost" width="64">
+</p>
 
-Self-hosted web interface for the [Pi coding agent](https://github.com/badlogic/pi-mono). Runs on a server (Mac Mini, homelab, etc.) and exposes Pi through a browser — start a task from your laptop, pick it up on your phone.
+<h1 align="center">pi-webhost</h1>
 
-> **Status**: Active development. Core chat works. Multi-device session persistence is next.
+<p align="center">
+  Browser interface for the <a href="https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent">Pi coding agent</a>.
+  <br />
+  Run Pi on a server, use it from any device.
+</p>
 
-## What This Does
+> **Early development.** Core chat works. Multi-device session persistence is next.
 
-Pi is a terminal-based coding agent. pi-webhost wraps its SDK to give you:
+---
 
-- **Real-time streaming chat** in the browser with tool call visualization (read, write, edit, bash)
-- **Multiple concurrent sessions** — start several tasks, they run in parallel
-- **Model switching** — any provider Pi supports (Anthropic, OpenAI, Google, etc.)
-- **Thinking level control** — adjust reasoning depth per session
+## What This Is
+
+Pi is a terminal coding agent. pi-webhost wraps [Pi's SDK](https://github.com/badlogic/pi-mono/blob/main/docs/sdk.md) to run the agent server-side and stream results to a browser over WebSocket. The server holds the sessions — you connect from whatever device is in front of you.
+
+**Target setup:** Pi running on a Mac Mini (or any always-on machine) on your home network. Start a task from your laptop. Close the lid. Pick it up on your phone. The agent keeps working.
+
+pi-webhost does **not** use Pi's [`web-ui`](https://github.com/badlogic/pi-mono/tree/main/packages/web-ui) package. That library is designed for browser-side agents that call LLM providers directly via `fetch`. pi-webhost runs the full coding agent server-side with real filesystem tools (`read`, `write`, `edit`, `bash`), streaming events to the browser.
+
+## Features
+
+- **Real-time streaming** — tool calls, results, thinking blocks, and text render as they arrive
+- **Concurrent sessions** — run multiple tasks in parallel, switch between them instantly
+- **Model switching** — any provider Pi supports (Anthropic, OpenAI, Google, Groq, etc.)
+- **Thinking levels** — adjust reasoning depth per session
 - **Session persistence** — sessions save to disk via Pi's SessionManager, resume later
-- **OAuth passthrough** — use Anthropic Pro/Max or OpenAI Plus/Pro subscriptions
-
-It does **not** use Pi's `web-ui` package (`@mariozechner/pi-web-ui`), which is designed for browser-side agents calling LLM providers directly. pi-webhost runs the agent **server-side** with real filesystem tools, streaming events to the browser over WebSocket.
+- **Working directory per session** — each session targets a specific project
+- **OAuth passthrough** — use Anthropic Pro/Max or OpenAI Plus/Pro subscriptions via Pi's `/login`
+- **API key support** — set keys per-provider from the UI or environment variables
 
 ## Quick Start
 
@@ -23,71 +39,71 @@ It does **not** use Pi's `web-ui` package (`@mariozechner/pi-web-ui`), which is 
 git clone https://github.com/marcuslyons/pi-webhost.git
 cd pi-webhost
 npm install
+```
 
-# Authentication — pick one or more:
+Set up authentication (pick one or more):
 
-# Option A: Environment variable
+```bash
+# API key
 export ANTHROPIC_API_KEY=sk-ant-...
 
-# Option B: Pi's OAuth (run in terminal first)
+# Or Pi's OAuth — run in terminal first, then quit
 pi
-/login  # Complete OAuth flow, then quit
-# Credentials stored in ~/.pi/agent/auth.json, picked up automatically
+/login
+```
 
-# Option C: Set via the web UI sidebar (runtime only)
+Start the dev servers:
 
-# Start
+```bash
 npm run dev
 ```
 
-Open `http://localhost:5173`.
+Open **http://localhost:5173**.
 
 ## Architecture
 
 ```
 packages/
-├── server/              Hono + Node.js, port 3141
-│   ├── agent/manager.ts     Pi AgentSession lifecycle
-│   ├── api/routes.ts        REST: models, auth, sessions, health
-│   ├── ws/handler.ts        WebSocket ↔ Pi event bridge
-│   └── index.ts             Server entry, CORS, static serving
+├── server/                 Hono · Node.js · port 3141
+│   ├── agent/manager.ts       AgentSession lifecycle, model registry, auth
+│   ├── ws/handler.ts          WebSocket ↔ Pi event bridge
+│   ├── api/routes.ts          REST endpoints
+│   └── index.ts               Server entry
 │
-└── web/                 React 19 + Vite + Tailwind v4
-    ├── hooks/useAgent.ts    WebSocket client, event routing
-    ├── stores/chatStore.ts  Zustand state (per-session data)
-    ├── components/          Chat, Editor, Header, Sidebar, Message, NewSessionDialog
-    └── lib/types.ts         Shared TypeScript interfaces
+└── web/                    React 19 · Vite · Tailwind v4
+    ├── hooks/useAgent.ts      WebSocket client, per-session event routing
+    ├── stores/chatStore.ts    Zustand state management
+    ├── components/            Chat, Editor, Header, Sidebar, Message, NewSessionDialog
+    └── lib/types.ts           Shared types
 ```
 
-**Data flow**: User input → WebSocket → Server → Pi `AgentSession.prompt()` → Pi events → WebSocket → Client renders streamed text, tool calls, results.
+**How it works:**
 
-**Authentication**: Pi's `AuthStorage` resolves credentials in order: runtime API keys (set via UI) → `~/.pi/agent/auth.json` → environment variables.
+1. Server creates Pi `AgentSession` instances via the SDK
+2. Browser connects over WebSocket, sends commands (prompt, abort, set_model, ...)
+3. Server subscribes to Pi events, forwards them as tagged JSON (every event includes `sessionId`)
+4. Client routes events to per-session message arrays and renders in real-time
+5. Authentication flows through Pi's `AuthStorage` — same `~/.pi/agent/auth.json` used by the CLI
 
-### WebSocket Protocol
+### WebSocket Commands
 
-Client sends JSON commands:
-
-```jsonc
-{"type": "prompt", "message": "What files are in src/"}
-{"type": "abort"}
-{"type": "set_model", "provider": "anthropic", "modelId": "claude-sonnet-4-20250514"}
-{"type": "set_thinking_level", "level": "medium"}
-{"type": "new_session", "cwd": "/path/to/project"}
-{"type": "switch_session", "sessionPath": "/path/to/session.jsonl"}
-{"type": "close_session", "sessionId": "abc123"}
-{"type": "compact"}
-{"type": "steer", "message": "Focus on the tests"}
-{"type": "follow_up", "message": "Now run them"}
-```
-
-Server streams tagged events (every event includes `sessionId`):
-
-```jsonc
-{"type": "event", "sessionId": "abc", "event": {"type": "message_update", ...}}
-{"type": "event", "sessionId": "abc", "event": {"type": "tool_execution_start", "toolName": "bash", ...}}
-{"type": "session_created", "sessionId": "abc", "model": {...}}
-{"type": "live_sessions", "sessions": [...]}
-```
+| Command | Description |
+|---|---|
+| `prompt` | Send a user message (supports images) |
+| `abort` | Cancel in-flight generation |
+| `set_model` | Switch provider + model |
+| `set_thinking_level` | Adjust reasoning depth |
+| `new_session` | Create session (optional `cwd`) |
+| `switch_session` | Open a persisted session from disk |
+| `set_active_session` | Switch displayed session (client-side) |
+| `close_session` | Destroy a live session |
+| `steer` | Inject message during tool execution (interrupts remaining tools) |
+| `follow_up` | Queue message for after agent finishes |
+| `compact` | Summarize context to free tokens |
+| `get_models` | List available models |
+| `get_messages` | Fetch message history for a session |
+| `get_state` | Get current session state |
+| `list_persisted_sessions` | List saved sessions on disk |
 
 ### REST API
 
@@ -99,51 +115,69 @@ Server streams tagged events (every event includes `sessionId`):
 | `/api/sessions/persisted` | GET | Saved sessions on disk |
 | `/api/auth/status` | GET | Which providers have credentials |
 | `/api/auth/api-key` | POST | Set a runtime API key |
-| `/api/cwd` | GET | Server working directory + home |
-| `/api/validate-path` | GET | Validate a directory path |
+| `/api/cwd` | GET | Server working directory and home path |
+| `/api/validate-path` | GET | Validate a directory path exists |
+
+## Authentication
+
+pi-webhost uses Pi's credential system. Credentials resolve in order:
+
+1. **Runtime API keys** — set via the sidebar UI or `/api/auth/api-key` (not persisted across restarts)
+2. **Stored credentials** — `~/.pi/agent/auth.json` (written by Pi's `/login` command)
+3. **Environment variables** — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.
+
+For **OAuth subscriptions** (Anthropic Pro/Max, OpenAI Plus/Pro): run `pi` in a terminal, use `/login`, complete the flow. pi-webhost picks up the tokens automatically.
 
 ## Development
 
 ```bash
-npm run dev          # Server (3141) + Vite (5173) concurrently
-npm run typecheck    # TypeScript checking, both packages
+npm run dev          # Server (3141) + Vite dev server (5173)
+npm run typecheck    # TypeScript check, both packages
 npm run build        # Production build
 ```
 
+Vite proxies `/api/*` and `/ws` to the server in dev mode.
+
+### Individual packages
+
 ```bash
-# Individual packages
 npm run dev -w packages/server
 npm run dev -w packages/web
 ```
-
-Vite proxies `/api/*` and `/ws` to the server in dev mode.
 
 ## Production
 
 ```bash
 npm run build
-NODE_ENV=production npm start
+NODE_ENV=production npm start    # Serves frontend on port 3141
 ```
 
-Serves the built frontend from `packages/web/dist/` on port 3141 (or `$PORT`).
-
-## Roadmap
-
-Tracked in `docs/prds/` and `docs/plans/`:
-
-- **Server-owned sessions** — sessions persist independent of browser connections. Start from laptop, continue from phone. Multi-device attach/detach. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
-- **Session telemetry** — token counts (↑↓), cache stats (R/W), cost, context window % in a footer bar. Data is available via `session.getSessionStats()` and `session.getContextUsage()`. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
-- **Directory autocomplete** — predictive path input when creating new sessions. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
-- **Svelte 5 migration** — replace React + Zustand with Svelte runes. Server untouched. ([migration plan](docs/plans/svelte-migration.md), [analysis](docs/svelte-migration-analysis.md))
-
-## Environment Variables
+### Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `3141` | Server port |
-| `NODE_ENV` | — | `production` to serve built frontend |
+| `NODE_ENV` | — | `production` serves built frontend from `packages/web/dist/` |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `OPENAI_API_KEY` | — | OpenAI API key |
+
+## Roadmap
+
+Tracked in [`docs/prds/`](docs/prds/) and [`docs/plans/`](docs/plans/).
+
+**Server-owned sessions** — The big one. Sessions currently die when the browser disconnects. The plan is to move session ownership to the server so sessions survive client disconnects, server restarts, and device switches. Start from laptop, continue from phone. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
+
+**Session telemetry** — Token counts (↑↓), cache stats (R/W), cost, context window percentage. The data is already available via `session.getSessionStats()` and `session.getContextUsage()` — just needs a UI. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
+
+**Directory autocomplete** — Predictive path completion when creating new sessions. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
+
+**Svelte migration** — Replace React + Zustand with Svelte 5 runes. Server untouched. 12-task plan in [`docs/plans/svelte-migration.md`](docs/plans/svelte-migration.md).
+
+## What This Isn't
+
+This is not a managed service or multi-tenant platform. It's a personal tool that runs on your machine, on your network, with your credentials. There's no user auth, no rate limiting, no billing. If you expose it beyond localhost, that's on you.
+
+This is not a replacement for Pi's terminal interface. The terminal TUI has features (extensions, themes, keyboard shortcuts, `/tree`, branching, file references) that the web UI doesn't attempt to replicate. pi-webhost optimizes for accessibility from any device, not feature parity.
 
 ## License
 
