@@ -1,154 +1,150 @@
 # pi-webhost
 
-A self-hosted web interface for the [Pi coding agent](https://github.com/badlogic/pi-mono). Run Pi in your browser with full access to read, write, edit, and bash tools — using your existing Anthropic or OpenAI subscriptions.
+Self-hosted web interface for the [Pi coding agent](https://github.com/badlogic/pi-mono). Runs on a server (Mac Mini, homelab, etc.) and exposes Pi through a browser — start a task from your laptop, pick it up on your phone.
 
-Inspired by [OpenCode's self-hosted server](https://opencode.ai/docs/server/).
+> **Status**: Active development. Core chat works. Multi-device session persistence is next.
 
-## Features
+## What This Does
 
-- **Browser-based Pi agent** — chat interface with real-time streaming
-- **Full tool support** — read, write, edit, bash with output visualization
-- **Model selection** — switch between any configured provider/model
-- **Thinking levels** — control reasoning depth from the UI
-- **OAuth support** — use Anthropic Pro/Max or OpenAI Plus/Pro subscriptions (via Pi's login)
-- **API key support** — configure keys for any supported provider
-- **Session management** — create new sessions, auto-save to disk
-- **WebSocket streaming** — real-time event streaming from the Pi SDK
+Pi is a terminal-based coding agent. pi-webhost wraps its SDK to give you:
+
+- **Real-time streaming chat** in the browser with tool call visualization (read, write, edit, bash)
+- **Multiple concurrent sessions** — start several tasks, they run in parallel
+- **Model switching** — any provider Pi supports (Anthropic, OpenAI, Google, etc.)
+- **Thinking level control** — adjust reasoning depth per session
+- **Session persistence** — sessions save to disk via Pi's SessionManager, resume later
+- **OAuth passthrough** — use Anthropic Pro/Max or OpenAI Plus/Pro subscriptions
+
+It does **not** use Pi's `web-ui` package (`@mariozechner/pi-web-ui`), which is designed for browser-side agents calling LLM providers directly. pi-webhost runs the agent **server-side** with real filesystem tools, streaming events to the browser over WebSocket.
 
 ## Quick Start
 
 ```bash
-# Clone and install
 git clone https://github.com/marcuslyons/pi-webhost.git
 cd pi-webhost
 npm install
 
-# Set up authentication (pick one or more):
+# Authentication — pick one or more:
 
 # Option A: Environment variable
 export ANTHROPIC_API_KEY=sk-ant-...
 
-# Option B: Use Pi's OAuth (run in terminal first)
+# Option B: Pi's OAuth (run in terminal first)
 pi
-/login  # Select your provider, complete OAuth flow, then quit
+/login  # Complete OAuth flow, then quit
+# Credentials stored in ~/.pi/agent/auth.json, picked up automatically
 
-# Option C: Set via the web UI sidebar (runtime only, not persisted)
+# Option C: Set via the web UI sidebar (runtime only)
 
-# Start development servers
+# Start
 npm run dev
 ```
 
-Open http://localhost:5173 in your browser.
+Open `http://localhost:5173`.
 
 ## Architecture
 
 ```
-pi-webhost/
-├── packages/
-│   ├── server/          # Hono backend + Pi SDK integration
-│   │   └── src/
-│   │       ├── index.ts           # Server entry point
-│   │       ├── agent/manager.ts   # Pi AgentSession lifecycle
-│   │       ├── api/routes.ts      # REST API (models, auth, sessions)
-│   │       └── ws/handler.ts      # WebSocket ↔ Pi event bridge
-│   └── web/             # React + Vite + Tailwind frontend
-│       └── src/
-│           ├── App.tsx
-│           ├── components/        # Chat, Editor, Header, Sidebar, Message
-│           ├── hooks/useAgent.ts  # WebSocket client + event handling
-│           └── stores/chatStore.ts # Zustand state management
+packages/
+├── server/              Hono + Node.js, port 3141
+│   ├── agent/manager.ts     Pi AgentSession lifecycle
+│   ├── api/routes.ts        REST: models, auth, sessions, health
+│   ├── ws/handler.ts        WebSocket ↔ Pi event bridge
+│   └── index.ts             Server entry, CORS, static serving
+│
+└── web/                 React 19 + Vite + Tailwind v4
+    ├── hooks/useAgent.ts    WebSocket client, event routing
+    ├── stores/chatStore.ts  Zustand state (per-session data)
+    ├── components/          Chat, Editor, Header, Sidebar, Message, NewSessionDialog
+    └── lib/types.ts         Shared TypeScript interfaces
 ```
 
-### How it works
+**Data flow**: User input → WebSocket → Server → Pi `AgentSession.prompt()` → Pi events → WebSocket → Client renders streamed text, tool calls, results.
 
-1. The **server** creates Pi `AgentSession` instances via the SDK
-2. Each browser tab connects via **WebSocket** and gets its own session
-3. The server **subscribes** to Pi events and forwards them as JSON
-4. The **client** renders streamed text, tool calls, and results in real-time
-5. **Authentication** flows through Pi's `AuthStorage` — the same `~/.pi/agent/auth.json` used by the CLI
+**Authentication**: Pi's `AuthStorage` resolves credentials in order: runtime API keys (set via UI) → `~/.pi/agent/auth.json` → environment variables.
 
 ### WebSocket Protocol
 
 Client sends JSON commands:
-```json
-{"type": "prompt", "message": "What files are here?"}
+
+```jsonc
+{"type": "prompt", "message": "What files are in src/"}
 {"type": "abort"}
 {"type": "set_model", "provider": "anthropic", "modelId": "claude-sonnet-4-20250514"}
 {"type": "set_thinking_level", "level": "medium"}
-{"type": "new_session"}
-{"type": "get_models"}
+{"type": "new_session", "cwd": "/path/to/project"}
+{"type": "switch_session", "sessionPath": "/path/to/session.jsonl"}
+{"type": "close_session", "sessionId": "abc123"}
+{"type": "compact"}
+{"type": "steer", "message": "Focus on the tests"}
+{"type": "follow_up", "message": "Now run them"}
 ```
 
-Server streams Pi events:
-```json
-{"type": "event", "event": {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Hello"}}}
-{"type": "event", "event": {"type": "tool_execution_start", "toolName": "bash", "args": {"command": "ls"}}}
-{"type": "session_created", "sessionId": "abc123", "model": {...}}
+Server streams tagged events (every event includes `sessionId`):
+
+```jsonc
+{"type": "event", "sessionId": "abc", "event": {"type": "message_update", ...}}
+{"type": "event", "sessionId": "abc", "event": {"type": "tool_execution_start", "toolName": "bash", ...}}
+{"type": "session_created", "sessionId": "abc", "model": {...}}
+{"type": "live_sessions", "sessions": [...]}
 ```
 
-## REST API
+### REST API
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
+|---|---|---|
 | `/api/health` | GET | Health check |
-| `/api/models` | GET | List available models (with valid credentials) |
-| `/api/sessions` | GET | List active sessions |
-| `/api/auth/status` | GET | Check which providers have credentials |
-| `/api/auth/api-key` | POST | Set a runtime API key (not persisted) |
-
-## Configuration
-
-### Authentication
-
-pi-webhost uses Pi's credential system. Credentials are resolved in this order:
-
-1. Runtime API keys (set via UI or API, not persisted)
-2. Stored credentials in `~/.pi/agent/auth.json`
-3. Environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.)
-
-**For OAuth subscriptions** (Anthropic Pro/Max, OpenAI Plus/Pro):
-1. Run `pi` in your terminal
-2. Use `/login` and complete the OAuth flow
-3. Credentials are stored in `~/.pi/agent/auth.json`
-4. pi-webhost picks them up automatically
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `3141` | Server port |
-| `NODE_ENV` | — | Set to `production` to serve built frontend |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key |
-| `OPENAI_API_KEY` | — | OpenAI API key |
-
-## Production
-
-```bash
-# Build both packages
-npm run build
-
-# Start the production server
-NODE_ENV=production npm start
-```
-
-The server serves the built React app from `packages/web/dist/`.
+| `/api/models` | GET | Available models (filtered by valid credentials) |
+| `/api/sessions` | GET | Active sessions |
+| `/api/sessions/persisted` | GET | Saved sessions on disk |
+| `/api/auth/status` | GET | Which providers have credentials |
+| `/api/auth/api-key` | POST | Set a runtime API key |
+| `/api/cwd` | GET | Server working directory + home |
+| `/api/validate-path` | GET | Validate a directory path |
 
 ## Development
 
 ```bash
-# Run both server and web dev servers
-npm run dev
-
-# Server only (port 3141)
-npm run dev -w packages/server
-
-# Web only (port 5173, proxies to server)
-npm run dev -w packages/web
-
-# Type check
-npm run typecheck
+npm run dev          # Server (3141) + Vite (5173) concurrently
+npm run typecheck    # TypeScript checking, both packages
+npm run build        # Production build
 ```
+
+```bash
+# Individual packages
+npm run dev -w packages/server
+npm run dev -w packages/web
+```
+
+Vite proxies `/api/*` and `/ws` to the server in dev mode.
+
+## Production
+
+```bash
+npm run build
+NODE_ENV=production npm start
+```
+
+Serves the built frontend from `packages/web/dist/` on port 3141 (or `$PORT`).
+
+## Roadmap
+
+Tracked in `docs/prds/` and `docs/plans/`:
+
+- **Server-owned sessions** — sessions persist independent of browser connections. Start from laptop, continue from phone. Multi-device attach/detach. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
+- **Session telemetry** — token counts (↑↓), cache stats (R/W), cost, context window % in a footer bar. Data is available via `session.getSessionStats()` and `session.getContextUsage()`. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
+- **Directory autocomplete** — predictive path input when creating new sessions. ([PRD-001](docs/prds/001-telemetry-autocomplete-persistence.md))
+- **Svelte 5 migration** — replace React + Zustand with Svelte runes. Server untouched. ([migration plan](docs/plans/svelte-migration.md), [analysis](docs/svelte-migration-analysis.md))
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `3141` | Server port |
+| `NODE_ENV` | — | `production` to serve built frontend |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key |
+| `OPENAI_API_KEY` | — | OpenAI API key |
 
 ## License
 
-MIT
+[MIT](LICENSE)
