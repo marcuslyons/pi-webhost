@@ -20,6 +20,37 @@ export function useAgent() {
 
   const store = useChatStore.getState;
 
+  // ── localStorage session tracking ─────────────────────────────────
+
+  const STORAGE_KEY = "pi-webhost-sessions";
+
+  function saveSessionState() {
+    const s = store();
+    const data = {
+      subscribedSessionIds: Array.from(s.sessionDataMap.keys()),
+      activeSessionId: s.activeSessionId,
+    };
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch { /* localStorage full or unavailable */ }
+  }
+
+  function loadSessionState(): { subscribedSessionIds: string[]; activeSessionId: string | null } | null {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  /** On connect/reconnect, try to reattach to server sessions. */
+  function attemptReattach() {
+    // Ask the server what sessions exist
+    send({ type: "list_active_sessions" });
+  }
+
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
@@ -33,6 +64,7 @@ export function useAgent() {
       fetchModels();
       fetchAuthStatus();
       fetchServerInfo();
+      attemptReattach();
     };
 
     ws.onclose = () => {
@@ -66,6 +98,7 @@ export function useAgent() {
       s.setActiveSessionPath(data.sessionPath ?? null);
       s.setActiveCwd(data.cwd ?? null);
       s.setActiveIsStreaming(false);
+      saveSessionState();
       return;
     }
 
@@ -84,6 +117,7 @@ export function useAgent() {
         const msgs = buildMessagesFromHistory(data.messages);
         s.setMessages(sid, msgs);
       }
+      saveSessionState();
       return;
     }
 
@@ -128,11 +162,30 @@ export function useAgent() {
           s.setActiveIsStreaming(live.isStreaming);
         }
       }
+      if (data.command === "list_active_sessions" && data.success) {
+        // Reattach to sessions that exist on both client and server
+        const serverSessions: Array<{ id: string }> = data.data?.sessions ?? [];
+        const serverIds = new Set(serverSessions.map((s: any) => s.id));
+        const saved = loadSessionState();
+
+        if (saved && saved.subscribedSessionIds.length > 0) {
+          for (const sid of saved.subscribedSessionIds) {
+            if (serverIds.has(sid)) {
+              send({ type: "attach_session", sessionId: sid });
+            }
+          }
+          // Restore active session if it still exists
+          if (saved.activeSessionId && serverIds.has(saved.activeSessionId)) {
+            // Will be set when attach_session response arrives
+          }
+        }
+      }
       if (data.command === "close_session" && data.success) {
         s.removeSessionData(data.data?.closedSessionId);
         if (data.data?.activeSessionId) {
           s.setActiveSessionId(data.data.activeSessionId);
         }
+        saveSessionState();
       }
       return;
     }
