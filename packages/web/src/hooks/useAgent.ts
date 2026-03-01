@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useChatStore } from "../stores/chatStore";
-import type { ThinkingLevel } from "../lib/types";
+import type { ExtensionUIRequest, ThinkingLevel } from "../lib/types";
 
 let messageIdCounter = 0;
 function nextId() {
@@ -134,6 +134,11 @@ export function useAgent() {
           s.setActiveSessionId(data.data.activeSessionId);
         }
       }
+      return;
+    }
+
+    if (data.type === "extension_ui_request") {
+      handleExtensionUIRequest(data as ExtensionUIRequest);
       return;
     }
 
@@ -310,6 +315,43 @@ export function useAgent() {
     }
   }, []);
 
+  // ── Extension UI request handling ─────────────────────────────────
+
+  const handleExtensionUIRequest = useCallback((req: ExtensionUIRequest) => {
+    const s = store();
+
+    switch (req.method) {
+      case "select":
+      case "confirm":
+      case "input":
+      case "editor":
+        // Dialog methods — push to queue for the UI to render
+        s.pushExtensionDialog(req);
+        break;
+
+      case "notify":
+        s.addExtensionNotification({
+          id: req.id,
+          message: req.message,
+          notifyType: req.notifyType ?? "info",
+          timestamp: Date.now(),
+        });
+        // Auto-dismiss after 5 seconds
+        setTimeout(() => {
+          store().removeExtensionNotification(req.id);
+        }, 5000);
+        break;
+
+      // Fire-and-forget methods we can handle or ignore
+      case "setStatus":
+      case "setWidget":
+      case "setTitle":
+      case "set_editor_text":
+        // These could be implemented later; for now, ignore
+        break;
+    }
+  }, []);
+
   // ── Send command to server ────────────────────────────────────────
 
   const send = useCallback((cmd: any) => {
@@ -432,6 +474,14 @@ export function useAgent() {
     [send],
   );
 
+  const sendExtensionUIResponse = useCallback(
+    (sessionId: string, requestId: string, response: { value?: string; confirmed?: boolean; cancelled?: boolean }) => {
+      send({ type: "extension_ui_response", sessionId, requestId, response });
+      store().shiftExtensionDialog();
+    },
+    [send],
+  );
+
   const fetchModels = useCallback(() => {
     send({ type: "get_models" });
   }, [send]);
@@ -477,6 +527,7 @@ export function useAgent() {
     closeSession,
     fetchModels,
     fetchAuthStatus,
+    sendExtensionUIResponse,
   };
 }
 

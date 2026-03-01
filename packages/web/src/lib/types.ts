@@ -81,3 +81,28 @@ export interface SessionData {
   /** Track the current assistant message being streamed. */
   currentAssistantId: string | null;
 }
+
+// ── Extension UI Protocol ─────────────────────────────────────────
+
+/** A dialog request from a Pi extension, forwarded by the server. */
+export type ExtensionUIRequest =
+  | { type: "extension_ui_request"; sessionId: string; id: string; method: "select"; title: string; options: string[]; timeout?: number }
+  | { type: "extension_ui_request"; sessionId: string; id: string; method: "confirm"; title: string; message: string; timeout?: number }
+  | { type: "extension_ui_request"; sessionId: string; id: string; method: "input"; title: string; placeholder?: string; timeout?: number }
+  | { type: "extension_ui_request"; sessionId: string; id: string; method: "editor"; title: string; prefill?: string }
+  | { type: "extension_ui_request"; sessionId: string; id: string; method: "notify"; message: string; notifyType?: "info" | "warning" | "error" }
+  | { type: "extension_ui_request"; sessionId: string; id: string; method: "setStatus"; statusKey: string; statusText: string | undefined }
+  | { type: "extension_ui_request"; sessionId: string; id: string; method: "setWidget"; widgetKey: string; widgetLines: string[] | undefined; widgetPlacement?: "aboveEditor" | "belowEditor" }
+  | { type: "extension_ui_request"; sessionId: string; id: string; method: "setTitle"; title: string }
+  | { type: "extension_ui_request"; sessionId: string; id: string; method: "set_editor_text"; text: string };
+
+/** A dialog request that requires user response. */
+export type ExtensionUIDialog = Extract<ExtensionUIRequest, { method: "select" | "confirm" | "input" | "editor" }>;
+
+/** A notification from a Pi extension (fire-and-forget). */
+export interface ExtensionNotification {
+  id: string;
+  message: string;
+  notifyType: "info" | "warning" | "error";
+  timestamp: number;
+}

@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import type {
   ChatMessage,
+  ExtensionNotification,
+  ExtensionUIDialog,
   LiveSessionInfo,
   ModelInfo,
   SavedSessionInfo,
@@ -80,6 +82,14 @@ interface ChatStore {
   // Auth status
   authStatus: Record<string, { hasCredentials: boolean }>;
   setAuthStatus: (status: Record<string, { hasCredentials: boolean }>) => void;
+
+  // Extension UI
+  extensionDialogQueue: ExtensionUIDialog[];
+  pushExtensionDialog: (dialog: ExtensionUIDialog) => void;
+  shiftExtensionDialog: () => void;
+  extensionNotifications: ExtensionNotification[];
+  addExtensionNotification: (notification: ExtensionNotification) => void;
+  removeExtensionNotification: (id: string) => void;
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
@@ -203,4 +213,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Auth
   authStatus: {},
   setAuthStatus: (authStatus) => set({ authStatus }),
+
+  // Extension UI
+  extensionDialogQueue: [],
+  pushExtensionDialog: (dialog) =>
+    set((state) => ({
+      extensionDialogQueue: [...state.extensionDialogQueue, dialog],
+    })),
+  shiftExtensionDialog: () =>
+    set((state) => ({
+      extensionDialogQueue: state.extensionDialogQueue.slice(1),
+    })),
+  extensionNotifications: [],
+  addExtensionNotification: (notification) =>
+    set((state) => ({
+      extensionNotifications: [...state.extensionNotifications, notification],
+    })),
+  removeExtensionNotification: (id) =>
+    set((state) => ({
+      extensionNotifications: state.extensionNotifications.filter((n) => n.id !== id),
+    })),
 }));
