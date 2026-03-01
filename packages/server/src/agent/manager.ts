@@ -15,6 +15,9 @@ import {
   type AgentSession,
 } from "@mariozechner/pi-coding-agent";
 import { nanoid } from "nanoid";
+import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 /**
  * Serialize Pi events for JSON transport.
@@ -166,6 +169,7 @@ export class AgentManager {
 
     this.sessions.set(id, managed);
     this.setupSessionSubscription(id, managed);
+    this.scheduleSaveManifest();
     return managed;
   }
 
@@ -203,6 +207,7 @@ export class AgentManager {
       await managed.session.abort();
       managed.session.dispose();
       this.sessions.delete(id);
+      this.scheduleSaveManifest();
     }
   }
 
@@ -242,6 +247,7 @@ export class AgentManager {
 
     this.sessions.set(id, managed);
     this.setupSessionSubscription(id, managed);
+    this.scheduleSaveManifest();
     return managed;
   }
 
@@ -278,5 +284,96 @@ export class AgentManager {
       managed.session.dispose();
     }
     this.sessions.clear();
+  }
+
+  // ── Manifest persistence ──────────────────────────────────────────
+
+  private static MANIFEST_DIR = join(homedir(), ".pi", "agent", "pi-webhost");
+  private static MANIFEST_FILE = join(AgentManager.MANIFEST_DIR, "active-sessions.json");
+  private saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Save the current active session pool to a manifest file.
+   * Debounced — multiple calls within 1s are coalesced.
+   */
+  scheduleSaveManifest(): void {
+    if (this.saveDebounceTimer) clearTimeout(this.saveDebounceTimer);
+    this.saveDebounceTimer = setTimeout(() => {
+      this.saveManifest().catch((err) => {
+        console.error("[manifest] Failed to save:", err);
+      });
+    }, 1000);
+  }
+
+  private async saveManifest(): Promise<void> {
+    const manifest = {
+      sessions: Array.from(this.sessions.values())
+        .filter((m) => m.session.sessionFile) // Only save sessions that have persisted files
+        .map((m) => ({
+          sessionPath: m.session.sessionFile!,
+          cwd: m.cwd,
+          model: m.session.model
+            ? { provider: m.session.model.provider, id: m.session.model.id }
+            : null,
+          thinkingLevel: m.session.thinkingLevel,
+        })),
+    };
+
+    await mkdir(AgentManager.MANIFEST_DIR, { recursive: true });
+    const tmpPath = AgentManager.MANIFEST_FILE + ".tmp";
+    await writeFile(tmpPath, JSON.stringify(manifest, null, 2));
+    await rename(tmpPath, AgentManager.MANIFEST_FILE);
+  }
+
+  /**
+   * Load the manifest and reopen all sessions from it.
+   * Called once on server startup.
+   */
+  async loadManifest(): Promise<void> {
+    let data: string;
+    try {
+      data = await readFile(AgentManager.MANIFEST_FILE, "utf-8");
+    } catch {
+      // No manifest or can't read — start with empty pool
+      return;
+    }
+
+    let manifest: { sessions: Array<{
+      sessionPath: string;
+      cwd: string;
+      model?: { provider: string; id: string } | null;
+      thinkingLevel?: string;
+    }> };
+
+    try {
+      manifest = JSON.parse(data);
+    } catch {
+      console.warn("[manifest] Corrupt manifest file, starting with empty pool");
+      return;
+    }
+
+    if (!Array.isArray(manifest?.sessions)) return;
+
+    for (const entry of manifest.sessions) {
+      try {
+        const managed = await this.openSession(entry.sessionPath);
+        console.log(`[manifest] Restored session: ${entry.sessionPath}`);
+
+        // Restore model if specified
+        if (entry.model) {
+          const model = this.modelRegistry.find(entry.model.provider, entry.model.id);
+          if (model) {
+            await managed.session.setModel(model);
+          }
+        }
+
+        // Restore thinking level
+        if (entry.thinkingLevel) {
+          managed.session.setThinkingLevel(entry.thinkingLevel as any);
+        }
+      } catch (err) {
+        console.warn(`[manifest] Failed to restore session ${entry.sessionPath}:`, err);
+      }
+    }
   }
 }
