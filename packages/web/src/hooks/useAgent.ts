@@ -219,7 +219,20 @@ export function useAgent() {
       case "message_end": {
         const data = s.getSessionData(sessionId);
         if (data.currentAssistantId) {
-          s.updateMessage(sessionId, data.currentAssistantId, { isStreaming: false });
+          const update: Partial<import("../lib/types").ChatMessage> = { isStreaming: false };
+          // Extract per-message usage from the assistant message
+          const msg = event.message;
+          if (msg?.role === "assistant" && msg.usage) {
+            update.usage = {
+              input: msg.usage.input,
+              output: msg.usage.output,
+              cacheRead: msg.usage.cacheRead,
+              cacheWrite: msg.usage.cacheWrite,
+              totalTokens: msg.usage.totalTokens,
+              cost: msg.usage.cost,
+            };
+          }
+          s.updateMessage(sessionId, data.currentAssistantId, update);
         }
         break;
       }

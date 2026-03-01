@@ -18,6 +18,22 @@ export interface ModelInfo {
 }
 
 // Messages displayed in the chat UI
+/** Per-message token/cost usage (from Pi's AssistantMessage.usage). */
+export interface MessageUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "tool_call" | "tool_result" | "system";
@@ -27,6 +43,7 @@ export interface ChatMessage {
   model?: string;
   thinkingContent?: string;
   isStreaming?: boolean;
+  usage?: MessageUsage;
   // Tool-specific
   toolName?: string;
   toolCallId?: string;
