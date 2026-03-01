@@ -13,12 +13,15 @@ import {
   type AgentSession,
 } from "@mariozechner/pi-coding-agent";
 import { nanoid } from "nanoid";
+import { WebExtensionUIContext } from "../extensions/ui-context.js";
 
 export interface ManagedSession {
   id: string;
   session: AgentSession;
   cwd: string;
   createdAt: Date;
+  /** Extension UI context for this session. Set sender when WS attaches. */
+  uiContext: WebExtensionUIContext;
 }
 
 export class AgentManager {
@@ -64,11 +67,15 @@ export class AgentManager {
       settingsManager,
     });
 
+    const uiContext = new WebExtensionUIContext(id);
+    await session.bindExtensions({ uiContext });
+
     const managed: ManagedSession = {
       id,
       session,
       cwd,
       createdAt: new Date(),
+      uiContext,
     };
 
     this.sessions.set(id, managed);
@@ -98,6 +105,8 @@ export class AgentManager {
   async destroySession(id: string): Promise<void> {
     const managed = this.sessions.get(id);
     if (managed) {
+      managed.uiContext.cancelAll();
+      managed.uiContext.clearSender();
       await managed.session.abort();
       managed.session.dispose();
       this.sessions.delete(id);
@@ -131,11 +140,15 @@ export class AgentManager {
       settingsManager,
     });
 
+    const uiContext = new WebExtensionUIContext(id);
+    await session.bindExtensions({ uiContext });
+
     const managed: ManagedSession = {
       id,
       session,
       cwd,
       createdAt: new Date(),
+      uiContext,
     };
 
     this.sessions.set(id, managed);

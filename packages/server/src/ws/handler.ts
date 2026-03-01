@@ -26,7 +26,8 @@ type ClientCommand =
   | { type: "list_persisted_sessions"; cwd?: string }
   | { type: "switch_session"; sessionPath: string }
   | { type: "set_active_session"; sessionId: string }
-  | { type: "close_session"; sessionId: string };
+  | { type: "close_session"; sessionId: string }
+  | { type: "extension_ui_response"; sessionId: string; requestId: string; response: { value?: string; confirmed?: boolean; cancelled?: boolean } };
 
 function send(ws: WSContext, data: unknown) {
   ws.send(JSON.stringify(data));
@@ -68,6 +69,17 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
         });
       } catch {
         // Client disconnected
+      }
+    });
+
+    // Wire extension UI context sender to this WS connection
+    managed.uiContext.setSender((data) => {
+      if (state.ws) {
+        try {
+          send(state.ws, data);
+        } catch {
+          // Client disconnected
+        }
       }
     });
 
@@ -138,6 +150,10 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
     },
 
     async onClose() {
+      // Clean up extension UI context senders before destroying sessions
+      for (const [id, managed] of state.sessions) {
+        managed.uiContext.clearSender();
+      }
       // Clean up all sessions for this connection
       for (const [id, unsub] of state.unsubscribers) {
         unsub();
@@ -407,6 +423,19 @@ async function handleCommand(
         data: { activeSessionId: state.activeSessionId },
       });
       sendLiveSessionsList(ws);
+      break;
+    }
+
+    case "extension_ui_response": {
+      const managed = state.sessions.get(cmd.sessionId);
+      if (!managed) {
+        send(ws, { type: "error", message: `Session not found: ${cmd.sessionId}` });
+        break;
+      }
+      const handled = managed.uiContext.handleResponse(cmd.requestId, cmd.response);
+      if (!handled) {
+        send(ws, { type: "error", message: `No pending dialog with id: ${cmd.requestId}` });
+      }
       break;
     }
 
