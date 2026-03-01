@@ -1,6 +1,8 @@
 /**
- * AgentManager wraps Pi's SDK to manage agent sessions.
- * Each WebSocket connection gets its own AgentSession.
+ * AgentManager wraps Pi's SDK to manage the server-owned session pool.
+ * Sessions persist independent of WebSocket connections — clients attach
+ * and detach as observers. Sessions are only destroyed explicitly via
+ * destroySession().
  */
 
 import {
