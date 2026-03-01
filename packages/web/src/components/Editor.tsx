@@ -45,7 +45,7 @@ export function Editor({ onSend, onAbort }: EditorProps) {
   }, []);
 
   return (
-    <div className="border-t border-zinc-800 bg-zinc-900/50 p-4">
+    <div className="border-t border-zinc-800 bg-zinc-900/50 p-2 sm:p-4">
       <div
         className={`flex items-center gap-2 rounded-xl border bg-zinc-900 px-3 py-2 transition-colors ${
           isStreaming
