@@ -10,6 +10,8 @@ import { createNodeWebSocket } from "@hono/node-ws";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serveStatic } from "@hono/node-server/serve-static";
+import { readFileSync, existsSync } from "node:fs";
+import { createServer as createHttpsServer } from "node:https";
 import { AgentManager } from "./agent/manager.js";
 import { createApiRoutes } from "./api/routes.js";
 import { createWSHandlers } from "./ws/handler.js";
@@ -58,13 +60,46 @@ if (!DEV) {
   app.get("*", serveStatic({ root: "../web/dist", path: "index.html" }));
 }
 
-const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
+// TLS configuration
+const tlsCertPath = process.env.PI_WEBHOST_TLS_CERT;
+const tlsKeyPath = process.env.PI_WEBHOST_TLS_KEY;
+const useTLS = !!(tlsCertPath && tlsKeyPath);
+
+if (useTLS) {
+  if (!existsSync(tlsCertPath!)) {
+    console.error(`[tls] Certificate file not found: ${tlsCertPath}`);
+    process.exit(1);
+  }
+  if (!existsSync(tlsKeyPath!)) {
+    console.error(`[tls] Key file not found: ${tlsKeyPath}`);
+    process.exit(1);
+  }
+}
+
+const serveOptions: Parameters<typeof serve>[0] = {
+  fetch: app.fetch,
+  port: PORT,
+  ...(useTLS
+    ? {
+        createServer: createHttpsServer,
+        serverOptions: {
+          cert: readFileSync(tlsCertPath!),
+          key: readFileSync(tlsKeyPath!),
+        },
+      }
+    : {}),
+};
+
+const protocol = useTLS ? "https" : "http";
+const wsProtocol = useTLS ? "wss" : "ws";
+
+const server = serve(serveOptions, (info) => {
   console.log(`
 ┌─────────────────────────────────────────┐
 │  pi-webhost server                      │
 │                                         │
-│  http://localhost:${String(info.port).padEnd(24)}│
-│  WebSocket: ws://localhost:${String(info.port).padEnd(13)}│${DEV ? "\n│  Mode: development                      │" : "\n│  Mode: production                       │"}
+│  ${protocol}://localhost:${String(info.port).padEnd(24 - protocol.length + 4)}│
+│  ${wsProtocol}://localhost:${String(info.port).padEnd(19 - wsProtocol.length + 4)}│${DEV ? "\n│  Mode: development                      │" : "\n│  Mode: production                       │"}${useTLS ? "\n│  TLS: enabled                           │" : ""}
 └─────────────────────────────────────────┘
 `);
 });
