@@ -64,6 +64,29 @@ export interface SavedSessionInfo {
   firstMessage: string;
 }
 
+/** Token and cost statistics for a session. */
+export interface SessionStats {
+  tokens: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+  cost: number;
+  userMessages: number;
+  assistantMessages: number;
+  toolCalls: number;
+  totalMessages: number;
+}
+
+/** Context window usage for a session. */
+export interface ContextUsage {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}
+
 /** A session that's currently alive in this browser tab. */
 export interface LiveSessionInfo {
   id: string;
@@ -72,6 +95,7 @@ export interface LiveSessionInfo {
   isStreaming: boolean;
   model: ModelInfo | null;
   messageCount: number;
+  cost?: number;
 }
 
 /** Per-session data cached on the client. */

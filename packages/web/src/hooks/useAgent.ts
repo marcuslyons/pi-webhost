@@ -58,6 +58,11 @@ export function useAgent() {
   const handleServerMessage = useCallback((data: any) => {
     const s = store();
 
+    if (data.type === "stats_update") {
+      s.setSessionStats(data.sessionId, data.stats, data.context);
+      return;
+    }
+
     if (data.type === "session_created") {
       const sid = data.sessionId;
       s.ensureSessionData(sid);
@@ -66,6 +71,9 @@ export function useAgent() {
       s.setActiveSessionPath(data.sessionPath ?? null);
       s.setActiveCwd(data.cwd ?? null);
       s.setActiveIsStreaming(false);
+      if (data.stats) {
+        s.setSessionStats(sid, data.stats, data.context ?? null);
+      }
       return;
     }
 
@@ -78,6 +86,9 @@ export function useAgent() {
       s.setActiveCwd(data.cwd ?? null);
       s.setActiveThinkingLevel(data.thinkingLevel ?? "off");
       s.setActiveIsStreaming(false);
+      if (data.stats) {
+        s.setSessionStats(sid, data.stats, data.context ?? null);
+      }
 
       // Rebuild messages from loaded history
       if (data.messages?.length) {
