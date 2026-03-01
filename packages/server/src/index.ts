@@ -13,6 +13,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { AgentManager } from "./agent/manager.js";
 import { createApiRoutes } from "./api/routes.js";
 import { createWSHandlers } from "./ws/handler.js";
+import { createAuthMiddleware } from "./auth/middleware.js";
 
 const PORT = parseInt(process.env.PORT ?? "3141", 10);
 const DEV = process.env.NODE_ENV !== "production";
@@ -22,6 +23,13 @@ const agentManager = new AgentManager();
 
 // WebSocket setup
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
+
+// Optional authentication
+const authMiddleware = createAuthMiddleware();
+if (authMiddleware) {
+  app.use("*", authMiddleware);
+  console.log("[auth] Authentication enabled");
+}
 
 // CORS for dev (Vite runs on different port)
 if (DEV) {
