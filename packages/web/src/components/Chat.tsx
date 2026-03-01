@@ -5,7 +5,7 @@ import { Editor } from "./Editor";
 
 interface ChatProps {
   agent: {
-    sendPrompt: (message: string) => void;
+    sendPrompt: (message: string, images?: Array<{ data: string; mimeType: string }>) => void;
     abort: () => void;
   };
 }

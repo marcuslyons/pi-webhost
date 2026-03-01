@@ -321,7 +321,7 @@ export function useAgent() {
   // ── Public API ────────────────────────────────────────────────────
 
   const sendPrompt = useCallback(
-    (message: string) => {
+    (message: string, images?: Array<{ data: string; mimeType: string }>) => {
       const s = store();
       const sid = s.activeSessionId;
 
@@ -339,7 +339,9 @@ export function useAgent() {
         send({ type: "follow_up", message, sessionId: sid });
       } else {
         // If no active session, prompt will auto-create one on the server
-        send({ type: "prompt", message, sessionId: sid });
+        const promptCmd: any = { type: "prompt", message, sessionId: sid };
+        if (images?.length) promptCmd.images = images;
+        send(promptCmd);
 
         // If we didn't have a session, add user message after creation
         if (!sid) {
