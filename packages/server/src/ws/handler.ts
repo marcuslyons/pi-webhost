@@ -26,7 +26,8 @@ type ClientCommand =
   | { type: "list_persisted_sessions"; cwd?: string }
   | { type: "switch_session"; sessionPath: string }
   | { type: "set_active_session"; sessionId: string }
-  | { type: "close_session"; sessionId: string };
+  | { type: "close_session"; sessionId: string }
+  | { type: "get_stats"; sessionId?: string };
 
 function send(ws: WSContext, data: unknown) {
   ws.send(JSON.stringify(data));
@@ -53,6 +54,26 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
     ws: undefined,
   };
 
+  function getSessionStatsPayload(sessionId: string, managed: ManagedSession) {
+    const stats = managed.session.getSessionStats();
+    const context = managed.session.getContextUsage();
+    return {
+      type: "stats_update" as const,
+      sessionId,
+      stats: {
+        tokens: stats.tokens,
+        cost: stats.cost,
+        userMessages: stats.userMessages,
+        assistantMessages: stats.assistantMessages,
+        toolCalls: stats.toolCalls,
+        totalMessages: stats.totalMessages,
+      },
+      context: context
+        ? { tokens: context.tokens, contextWindow: context.contextWindow, percent: context.percent }
+        : null,
+    };
+  }
+
   function setupEventForwarding(sessionId: string, managed: ManagedSession) {
     // Remove previous subscription for this session
     const prev = state.unsubscribers.get(sessionId);
@@ -66,6 +87,12 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
           sessionId,
           event: serializeEvent(event),
         });
+
+        // Push stats after turn_end and agent_end
+        const eventType = (event as any).type;
+        if (eventType === "turn_end" || eventType === "agent_end") {
+          send(state.ws, getSessionStatsPayload(sessionId, managed));
+        }
       } catch {
         // Client disconnected
       }
@@ -75,6 +102,7 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
   }
 
   function sendSessionInfo(ws: WSContext, type: string, sessionId: string, managed: ManagedSession, extra?: Record<string, unknown>) {
+    const statsPayload = getSessionStatsPayload(sessionId, managed);
     send(ws, {
       type,
       sessionId,
@@ -83,6 +111,8 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
       model: managed.session.model
         ? { provider: managed.session.model.provider, id: managed.session.model.id, name: managed.session.model.name }
         : null,
+      stats: statsPayload.stats,
+      context: statsPayload.context,
       ...extra,
     });
   }
@@ -106,6 +136,7 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
         ? { provider: m.session.model.provider, id: m.session.model.id, name: m.session.model.name }
         : null,
       messageCount: m.session.messages.length,
+      cost: m.session.getSessionStats().cost,
     }));
     send(ws, {
       type: "live_sessions_update",
@@ -131,7 +162,7 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
       }
 
       try {
-        await handleCommand(cmd, ws, agentManager, state, setupEventForwarding, sendSessionInfo, getTargetSession, sendLiveSessionsList);
+        await handleCommand(cmd, ws, agentManager, state, setupEventForwarding, sendSessionInfo, getTargetSession, sendLiveSessionsList, getSessionStatsPayload);
       } catch (err) {
         send(ws, { type: "error", message: String(err) });
       }
@@ -161,6 +192,7 @@ async function handleCommand(
   sendSessionInfo: (ws: WSContext, type: string, id: string, m: ManagedSession, extra?: Record<string, unknown>) => void,
   getTargetSession: (sessionId?: string) => { id: string; managed: ManagedSession } | null,
   sendLiveSessionsList: (ws: WSContext) => void,
+  getSessionStatsPayload: (sessionId: string, managed: ManagedSession) => { type: "stats_update"; sessionId: string; stats: any; context: any },
 ) {
   switch (cmd.type) {
     case "prompt": {
@@ -353,6 +385,7 @@ async function handleCommand(
       setupEventForwarding(opened.id, opened);
 
       const messages = opened.session.messages.map(serializeAgentMessage);
+      const switchStats = getSessionStatsPayload(opened.id, opened);
 
       send(ws, {
         type: "session_switched",
@@ -364,6 +397,8 @@ async function handleCommand(
           : null,
         thinkingLevel: opened.session.thinkingLevel,
         messages,
+        stats: switchStats.stats,
+        context: switchStats.context,
       });
       sendLiveSessionsList(ws);
       break;
@@ -407,6 +442,16 @@ async function handleCommand(
         data: { activeSessionId: state.activeSessionId },
       });
       sendLiveSessionsList(ws);
+      break;
+    }
+
+    case "get_stats": {
+      const target = getTargetSession(cmd.sessionId);
+      if (!target) {
+        send(ws, { type: "error", message: "No active session" });
+        break;
+      }
+      send(ws, getSessionStatsPayload(target.id, target.managed));
       break;
     }
 
