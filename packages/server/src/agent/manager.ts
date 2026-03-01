@@ -16,6 +16,17 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { nanoid } from "nanoid";
 
+/**
+ * Serialize Pi events for JSON transport.
+ */
+function serializeEvent(event: any): any {
+  try {
+    return JSON.parse(JSON.stringify(event));
+  } catch {
+    return { type: event.type, error: "Failed to serialize event" };
+  }
+}
+
 export interface ManagedSession {
   id: string;
   session: AgentSession;
@@ -23,8 +34,19 @@ export interface ManagedSession {
   createdAt: Date;
 }
 
+/** Opaque handle for a connected client (used for broadcasting). */
+export interface ClientHandle {
+  send: (data: string) => void;
+}
+
+type EventBroadcaster = (sessionId: string, event: any) => void;
+
 export class AgentManager {
   private sessions = new Map<string, ManagedSession>();
+  /** Per-session subscriber sets: sessionId → Set<ClientHandle>. */
+  private subscribers = new Map<string, Set<ClientHandle>>();
+  /** Per-session unsubscribers for the AgentSession event subscription. */
+  private sessionUnsubscribers = new Map<string, () => void>();
   private authStorage: AuthStorage;
   private modelRegistry: ModelRegistry;
 
@@ -32,6 +54,75 @@ export class AgentManager {
     // Use Pi's default auth storage (reads from ~/.pi/agent/auth.json + env vars)
     this.authStorage = AuthStorage.create();
     this.modelRegistry = new ModelRegistry(this.authStorage);
+  }
+
+  /**
+   * Attach a client to a session. The client will receive all events
+   * for this session via its send() method.
+   */
+  attachClient(sessionId: string, client: ClientHandle): void {
+    let subs = this.subscribers.get(sessionId);
+    if (!subs) {
+      subs = new Set();
+      this.subscribers.set(sessionId, subs);
+    }
+    subs.add(client);
+  }
+
+  /**
+   * Detach a client from a session. The session keeps running.
+   */
+  detachClient(sessionId: string, client: ClientHandle): void {
+    const subs = this.subscribers.get(sessionId);
+    if (subs) {
+      subs.delete(client);
+      if (subs.size === 0) this.subscribers.delete(sessionId);
+    }
+  }
+
+  /**
+   * Detach a client from ALL sessions. Called on WebSocket close.
+   */
+  detachAllForClient(client: ClientHandle): void {
+    for (const [, subs] of this.subscribers) {
+      subs.delete(client);
+    }
+  }
+
+  /**
+   * Broadcast a JSON event to all clients attached to a session.
+   */
+  broadcastEvent(sessionId: string, data: unknown): void {
+    const subs = this.subscribers.get(sessionId);
+    if (!subs) return;
+    const json = JSON.stringify(data);
+    for (const client of subs) {
+      try {
+        client.send(json);
+      } catch {
+        // Client disconnected — will be cleaned up on onClose
+      }
+    }
+  }
+
+  /**
+   * Set up the internal event subscription for a session.
+   * Called once when the session is created/opened. Broadcasts to all
+   * attached clients.
+   */
+  private setupSessionSubscription(sessionId: string, managed: ManagedSession): void {
+    // Don't double-subscribe
+    if (this.sessionUnsubscribers.has(sessionId)) return;
+
+    const unsub = managed.session.subscribe((event) => {
+      this.broadcastEvent(sessionId, {
+        type: "event",
+        sessionId,
+        event: serializeEvent(event),
+      });
+    });
+
+    this.sessionUnsubscribers.set(sessionId, unsub);
   }
 
   getAuthStorage(): AuthStorage {
@@ -74,6 +165,7 @@ export class AgentManager {
     };
 
     this.sessions.set(id, managed);
+    this.setupSessionSubscription(id, managed);
     return managed;
   }
 
@@ -100,6 +192,14 @@ export class AgentManager {
   async destroySession(id: string): Promise<void> {
     const managed = this.sessions.get(id);
     if (managed) {
+      // Clean up internal subscription
+      const unsub = this.sessionUnsubscribers.get(id);
+      if (unsub) {
+        unsub();
+        this.sessionUnsubscribers.delete(id);
+      }
+      this.subscribers.delete(id);
+
       await managed.session.abort();
       managed.session.dispose();
       this.sessions.delete(id);
@@ -141,6 +241,7 @@ export class AgentManager {
     };
 
     this.sessions.set(id, managed);
+    this.setupSessionSubscription(id, managed);
     return managed;
   }
 
@@ -167,11 +268,14 @@ export class AgentManager {
   }
 
   dispose(): void {
-    for (const [id] of this.sessions) {
-      const managed = this.sessions.get(id);
-      if (managed) {
-        managed.session.dispose();
-      }
+    for (const [, unsub] of this.sessionUnsubscribers) {
+      unsub();
+    }
+    this.sessionUnsubscribers.clear();
+    this.subscribers.clear();
+
+    for (const [, managed] of this.sessions) {
+      managed.session.dispose();
     }
     this.sessions.clear();
   }
