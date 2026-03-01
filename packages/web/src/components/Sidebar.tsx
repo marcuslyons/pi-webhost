@@ -248,6 +248,9 @@ function SessionsTab({
                       {shortenCwd(session.cwd)}
                       {" · "}
                       {session.messageCount} msg{session.messageCount !== 1 ? "s" : ""}
+                      {session.cost != null && session.cost > 0 && (
+                        <>{" · "}${session.cost < 0.01 ? session.cost.toFixed(4) : session.cost.toFixed(2)}</>
+                      )}
                       {session.isStreaming ? " · streaming" : ""}
                     </span>
                   </button>
