@@ -13,6 +13,7 @@ import {
   type AgentSession,
 } from "@mariozechner/pi-coding-agent";
 import { nanoid } from "nanoid";
+import { unlink } from "node:fs/promises";
 
 export interface ManagedSession {
   id: string;
@@ -158,6 +159,65 @@ export class AgentManager {
       messageCount: s.messageCount,
       firstMessage: s.firstMessage,
     }));
+  }
+
+  /**
+   * Rename a live session. Uses Pi's built-in session naming
+   * (appends a session_info entry to the JSONL file).
+   */
+  renameSession(id: string, name: string): void {
+    const managed = this.sessions.get(id);
+    if (!managed) {
+      throw new Error(`Session not found: ${id}`);
+    }
+    managed.session.setSessionName(name);
+  }
+
+  /**
+   * Rename a persisted (not live) session by opening it temporarily,
+   * setting the name, and disposing immediately.
+   */
+  async renamePersistedSession(sessionPath: string, name: string): Promise<void> {
+    // Check if this session is already live — if so, use the live instance
+    for (const managed of this.sessions.values()) {
+      if (managed.session.sessionFile === sessionPath) {
+        managed.session.setSessionName(name);
+        return;
+      }
+    }
+
+    // Not live: open temporarily, rename, dispose
+    const cwd = process.cwd();
+    const settingsManager = SettingsManager.create(cwd);
+    const resourceLoader = new DefaultResourceLoader({ cwd, settingsManager });
+    await resourceLoader.reload();
+
+    const { session } = await createAgentSession({
+      cwd,
+      authStorage: this.authStorage,
+      modelRegistry: this.modelRegistry,
+      resourceLoader,
+      sessionManager: SessionManager.open(sessionPath),
+      settingsManager,
+    });
+
+    session.setSessionName(name);
+    session.dispose();
+  }
+
+  /**
+   * Delete a persisted session file from disk.
+   * Refuses to delete sessions that are currently live.
+   */
+  async deletePersistedSession(sessionPath: string): Promise<void> {
+    // Block deletion of live sessions
+    for (const managed of this.sessions.values()) {
+      if (managed.session.sessionFile === sessionPath) {
+        throw new Error("Cannot delete a session that is currently open. Close it first.");
+      }
+    }
+
+    await unlink(sessionPath);
   }
 
   async getAvailableModels() {
