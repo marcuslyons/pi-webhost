@@ -20,6 +20,42 @@ export function useAgent() {
 
   const store = useChatStore.getState;
 
+  // ── Tab title notifications ───────────────────────────────────────
+
+  const ORIGINAL_TITLE = "pi-webhost";
+  const unreadCountRef = useRef(0);
+  const tabFocusedRef = useRef(document.hasFocus());
+
+  const updateTitle = useCallback(() => {
+    const count = unreadCountRef.current;
+    document.title = count > 0 ? `(${count}) ${ORIGINAL_TITLE}` : ORIGINAL_TITLE;
+  }, []);
+
+  const incrementUnread = useCallback(() => {
+    if (!tabFocusedRef.current) {
+      unreadCountRef.current++;
+      updateTitle();
+    }
+  }, [updateTitle]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      tabFocusedRef.current = true;
+      unreadCountRef.current = 0;
+      updateTitle();
+    };
+    const onBlur = () => {
+      tabFocusedRef.current = false;
+    };
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+      document.title = ORIGINAL_TITLE;
+    };
+  }, [updateTitle]);
+
   // ── localStorage session tracking ─────────────────────────────────
 
   const STORAGE_KEY = "pi-webhost-sessions";
@@ -247,6 +283,7 @@ export function useAgent() {
           s.updateMessage(sessionId, data.currentAssistantId, { isStreaming: false });
           s.setCurrentAssistantId(sessionId, null);
         }
+        incrementUnread();
         break;
       }
 
