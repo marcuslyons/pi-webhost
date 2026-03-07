@@ -1,8 +1,11 @@
 /**
  * WebSocket handler that bridges Pi AgentSession events to the browser.
  *
- * Supports multiple concurrent sessions per WebSocket connection.
- * Events from all sessions are forwarded, tagged with sessionId.
+ * Sessions are server-owned (live in AgentManager). Connections subscribe
+ * to sessions and receive events — closing a connection does NOT destroy
+ * sessions. Sessions persist until explicitly closed via close_session.
+ *
+ * Events from all subscribed sessions are forwarded, tagged with sessionId.
  * Commands target the active session unless a sessionId is specified.
  */
 
@@ -27,6 +30,9 @@ type ClientCommand =
   | { type: "switch_session"; sessionPath: string }
   | { type: "set_active_session"; sessionId: string }
   | { type: "close_session"; sessionId: string }
+  | { type: "attach_session"; sessionId: string }
+  | { type: "detach_session"; sessionId: string }
+  | { type: "list_active_sessions" }
   | { type: "get_stats"; sessionId?: string }
   | { type: "rename_session"; sessionPath: string; name: string }
   | { type: "delete_session"; sessionPath: string };
@@ -36,11 +42,12 @@ function send(ws: WSContext, data: unknown) {
 }
 
 /**
- * Per-connection state: tracks multiple live sessions and which one is active.
+ * Per-connection state: tracks which sessions this client is subscribed to
+ * and which one is active. Sessions themselves live in AgentManager.
  */
 interface ConnectionState {
-  sessions: Map<string, ManagedSession>;
-  unsubscribers: Map<string, () => void>;
+  /** Session IDs this connection is subscribed to (receives events for). */
+  subscribedSessionIds: Set<string>;
   activeSessionId: string | null;
   ws: WSContext | undefined;
 }
@@ -50,8 +57,7 @@ interface ConnectionState {
  */
 export function createWSHandlers(agentManager: AgentManager): WSEvents {
   const state: ConnectionState = {
-    sessions: new Map(),
-    unsubscribers: new Map(),
+    subscribedSessionIds: new Set(),
     activeSessionId: null,
     ws: undefined,
   };
@@ -76,31 +82,23 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
     };
   }
 
-  function setupEventForwarding(sessionId: string, managed: ManagedSession) {
-    // Remove previous subscription for this session
-    const prev = state.unsubscribers.get(sessionId);
-    if (prev) prev();
-
-    const unsub = managed.session.subscribe((event) => {
-      if (!state.ws) return;
-      try {
-        send(state.ws, {
-          type: "event",
-          sessionId,
-          event: serializeEvent(event),
-        });
-
-        // Push stats after turn_end and agent_end
-        const eventType = (event as any).type;
-        if (eventType === "turn_end" || eventType === "agent_end") {
-          send(state.ws, getSessionStatsPayload(sessionId, managed));
-        }
-      } catch {
-        // Client disconnected
+  /** The client handle for this connection, used with AgentManager's subscriber system. */
+  const clientHandle = {
+    send: (data: string) => {
+      if (state.ws) {
+        try { state.ws.send(data); } catch { /* disconnected */ }
       }
-    });
+    },
+  };
 
-    state.unsubscribers.set(sessionId, unsub);
+  function attachToSession(sessionId: string) {
+    state.subscribedSessionIds.add(sessionId);
+    agentManager.attachClient(sessionId, clientHandle);
+  }
+
+  function detachFromSession(sessionId: string) {
+    state.subscribedSessionIds.delete(sessionId);
+    agentManager.detachClient(sessionId, clientHandle);
   }
 
   function sendSessionInfo(ws: WSContext, type: string, sessionId: string, managed: ManagedSession, extra?: Record<string, unknown>) {
@@ -122,24 +120,29 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
   function getTargetSession(sessionId?: string): { id: string; managed: ManagedSession } | null {
     const id = sessionId ?? state.activeSessionId;
     if (!id) return null;
-    const managed = state.sessions.get(id);
+    const managed = agentManager.getSession(id);
     if (!managed) return null;
     return { id, managed };
   }
 
-  /** Send a snapshot of all live sessions to the client. */
+  /** Send a snapshot of this client's subscribed sessions. */
   function sendLiveSessionsList(ws: WSContext) {
-    const liveSessions = Array.from(state.sessions.entries()).map(([id, m]) => ({
-      id,
-      sessionPath: m.session.sessionFile ?? null,
-      cwd: m.cwd,
-      isStreaming: m.session.isStreaming,
-      model: m.session.model
-        ? { provider: m.session.model.provider, id: m.session.model.id, name: m.session.model.name }
-        : null,
-      messageCount: m.session.messages.length,
-      cost: m.session.getSessionStats().cost,
-    }));
+    const liveSessions: any[] = [];
+    for (const id of state.subscribedSessionIds) {
+      const m = agentManager.getSession(id);
+      if (!m) continue;
+      liveSessions.push({
+        id,
+        sessionPath: m.session.sessionFile ?? null,
+        cwd: m.cwd,
+        isStreaming: m.session.isStreaming,
+        model: m.session.model
+          ? { provider: m.session.model.provider, id: m.session.model.id, name: m.session.model.name }
+          : null,
+        messageCount: m.session.messages.length,
+        cost: m.session.getSessionStats().cost,
+      });
+    }
     send(ws, {
       type: "live_sessions_update",
       activeSessionId: state.activeSessionId,
@@ -164,22 +167,16 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
       }
 
       try {
-        await handleCommand(cmd, ws, agentManager, state, setupEventForwarding, sendSessionInfo, getTargetSession, sendLiveSessionsList, getSessionStatsPayload);
+        await handleCommand(cmd, ws, agentManager, state, attachToSession, detachFromSession, sendSessionInfo, getTargetSession, sendLiveSessionsList, getSessionStatsPayload);
       } catch (err) {
         send(ws, { type: "error", message: String(err) });
       }
     },
 
     async onClose() {
-      // Clean up all sessions for this connection
-      for (const [id, unsub] of state.unsubscribers) {
-        unsub();
-      }
-      for (const [id] of state.sessions) {
-        await agentManager.destroySession(id);
-      }
-      state.sessions.clear();
-      state.unsubscribers.clear();
+      // Detach from all sessions — sessions stay alive in AgentManager
+      agentManager.detachAllForClient(clientHandle);
+      state.subscribedSessionIds.clear();
       state.ws = undefined;
     },
   };
@@ -190,7 +187,8 @@ async function handleCommand(
   ws: WSContext,
   agentManager: AgentManager,
   state: ConnectionState,
-  setupEventForwarding: (id: string, m: ManagedSession) => void,
+  attachToSession: (sessionId: string) => void,
+  detachFromSession: (sessionId: string) => void,
   sendSessionInfo: (ws: WSContext, type: string, id: string, m: ManagedSession, extra?: Record<string, unknown>) => void,
   getTargetSession: (sessionId?: string) => { id: string; managed: ManagedSession } | null,
   sendLiveSessionsList: (ws: WSContext) => void,
@@ -203,9 +201,8 @@ async function handleCommand(
       if (!target) {
         // Auto-create session on first prompt
         const managed = await agentManager.createSession();
-        state.sessions.set(managed.id, managed);
+        attachToSession(managed.id);
         state.activeSessionId = managed.id;
-        setupEventForwarding(managed.id, managed);
         sendSessionInfo(ws, "session_created", managed.id, managed);
         sendLiveSessionsList(ws);
         target = { id: managed.id, managed };
@@ -289,16 +286,21 @@ async function handleCommand(
     }
 
     case "get_state": {
-      const liveSessions = Array.from(state.sessions.entries()).map(([id, m]) => ({
-        id,
-        sessionPath: m.session.sessionFile ?? null,
-        isStreaming: m.session.isStreaming,
-        model: m.session.model
-          ? { provider: m.session.model.provider, id: m.session.model.id, name: m.session.model.name }
-          : null,
-        thinkingLevel: m.session.thinkingLevel,
-        messageCount: m.session.messages.length,
-      }));
+      const liveSessions: any[] = [];
+      for (const id of state.subscribedSessionIds) {
+        const m = agentManager.getSession(id);
+        if (!m) continue;
+        liveSessions.push({
+          id,
+          sessionPath: m.session.sessionFile ?? null,
+          isStreaming: m.session.isStreaming,
+          model: m.session.model
+            ? { provider: m.session.model.provider, id: m.session.model.id, name: m.session.model.name }
+            : null,
+          thinkingLevel: m.session.thinkingLevel,
+          messageCount: m.session.messages.length,
+        });
+      }
       send(ws, {
         type: "response",
         command: "get_state",
@@ -360,9 +362,8 @@ async function handleCommand(
     case "new_session": {
       // Create a new session WITHOUT destroying existing ones
       const managed = await agentManager.createSession({ cwd: cmd.cwd });
-      state.sessions.set(managed.id, managed);
+      attachToSession(managed.id);
       state.activeSessionId = managed.id;
-      setupEventForwarding(managed.id, managed);
       sendSessionInfo(ws, "session_created", managed.id, managed);
       sendLiveSessionsList(ws);
       break;
@@ -382,9 +383,8 @@ async function handleCommand(
     case "switch_session": {
       // Open a persisted session WITHOUT destroying existing ones
       const opened = await agentManager.openSession(cmd.sessionPath);
-      state.sessions.set(opened.id, opened);
+      attachToSession(opened.id);
       state.activeSessionId = opened.id;
-      setupEventForwarding(opened.id, opened);
 
       const messages = opened.session.messages.map(serializeAgentMessage);
       const switchStats = getSessionStatsPayload(opened.id, opened);
@@ -407,7 +407,7 @@ async function handleCommand(
     }
 
     case "set_active_session": {
-      if (!state.sessions.has(cmd.sessionId)) {
+      if (!state.subscribedSessionIds.has(cmd.sessionId)) {
         send(ws, { type: "error", message: `Session not found: ${cmd.sessionId}` });
         break;
       }
@@ -423,17 +423,12 @@ async function handleCommand(
     }
 
     case "close_session": {
-      const unsub = state.unsubscribers.get(cmd.sessionId);
-      if (unsub) {
-        unsub();
-        state.unsubscribers.delete(cmd.sessionId);
-      }
-      state.sessions.delete(cmd.sessionId);
+      detachFromSession(cmd.sessionId);
       await agentManager.destroySession(cmd.sessionId);
 
       // If we closed the active session, pick another or clear
       if (state.activeSessionId === cmd.sessionId) {
-        const remaining = Array.from(state.sessions.keys());
+        const remaining = Array.from(state.subscribedSessionIds);
         state.activeSessionId = remaining.length > 0 ? remaining[remaining.length - 1] : null;
       }
 
@@ -444,6 +439,65 @@ async function handleCommand(
         data: { activeSessionId: state.activeSessionId },
       });
       sendLiveSessionsList(ws);
+      break;
+    }
+
+    case "attach_session": {
+      const managed = agentManager.getSession(cmd.sessionId);
+      if (!managed) {
+        send(ws, { type: "error", message: `Session not found: ${cmd.sessionId}` });
+        break;
+      }
+      attachToSession(cmd.sessionId);
+      state.activeSessionId = cmd.sessionId;
+
+      const attachMessages = managed.session.messages.map(serializeAgentMessage);
+      send(ws, {
+        type: "session_switched",
+        sessionId: cmd.sessionId,
+        sessionPath: managed.session.sessionFile ?? null,
+        cwd: managed.cwd,
+        model: managed.session.model
+          ? { provider: managed.session.model.provider, id: managed.session.model.id, name: managed.session.model.name }
+          : null,
+        thinkingLevel: managed.session.thinkingLevel,
+        messages: attachMessages,
+      });
+      sendLiveSessionsList(ws);
+      break;
+    }
+
+    case "detach_session": {
+      detachFromSession(cmd.sessionId);
+      if (state.activeSessionId === cmd.sessionId) {
+        const remaining = Array.from(state.subscribedSessionIds);
+        state.activeSessionId = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+      }
+      send(ws, {
+        type: "response",
+        command: "detach_session",
+        success: true,
+        data: { sessionId: cmd.sessionId, activeSessionId: state.activeSessionId },
+      });
+      sendLiveSessionsList(ws);
+      break;
+    }
+
+    case "list_active_sessions": {
+      // Return ALL sessions in the server's pool (not just this client's)
+      const allSessions = agentManager.listSessions().map((s) => ({
+        id: s.id,
+        cwd: s.cwd,
+        isStreaming: s.isStreaming,
+        model: s.model,
+        createdAt: s.createdAt.toISOString(),
+      }));
+      send(ws, {
+        type: "response",
+        command: "list_active_sessions",
+        success: true,
+        data: { sessions: allSessions },
+      });
       break;
     }
 
@@ -481,17 +535,6 @@ async function handleCommand(
 
     default:
       send(ws, { type: "error", message: `Unknown command: ${(cmd as any).type}` });
-  }
-}
-
-/**
- * Serialize Pi events for JSON transport.
- */
-function serializeEvent(event: any): any {
-  try {
-    return JSON.parse(JSON.stringify(event));
-  } catch {
-    return { type: event.type, error: "Failed to serialize event" };
   }
 }
 

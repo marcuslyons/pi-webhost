@@ -50,6 +50,16 @@ if (!DEV) {
   app.get("*", serveStatic({ root: "../web/dist", path: "index.html" }));
 }
 
+// Restore sessions from manifest before accepting connections
+agentManager.loadManifest().then(() => {
+  const restored = agentManager.listSessions().length;
+  if (restored > 0) {
+    console.log(`[startup] Restored ${restored} session(s) from manifest`);
+  }
+}).catch((err) => {
+  console.warn("[startup] Manifest load error:", err);
+});
+
 const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
   console.log(`
 ┌─────────────────────────────────────────┐
