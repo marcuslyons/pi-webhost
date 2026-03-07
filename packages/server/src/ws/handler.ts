@@ -27,7 +27,9 @@ type ClientCommand =
   | { type: "switch_session"; sessionPath: string }
   | { type: "set_active_session"; sessionId: string }
   | { type: "close_session"; sessionId: string }
-  | { type: "get_stats"; sessionId?: string };
+  | { type: "get_stats"; sessionId?: string }
+  | { type: "rename_session"; sessionPath: string; name: string }
+  | { type: "delete_session"; sessionPath: string };
 
 function send(ws: WSContext, data: unknown) {
   ws.send(JSON.stringify(data));
@@ -452,6 +454,28 @@ async function handleCommand(
         break;
       }
       send(ws, getSessionStatsPayload(target.id, target.managed));
+      break;
+    }
+
+    case "rename_session": {
+      await agentManager.renamePersistedSession(cmd.sessionPath, cmd.name);
+      send(ws, {
+        type: "response",
+        command: "rename_session",
+        success: true,
+        data: { sessionPath: cmd.sessionPath, name: cmd.name },
+      });
+      break;
+    }
+
+    case "delete_session": {
+      await agentManager.deletePersistedSession(cmd.sessionPath);
+      send(ws, {
+        type: "response",
+        command: "delete_session",
+        success: true,
+        data: { sessionPath: cmd.sessionPath },
+      });
       break;
     }
 

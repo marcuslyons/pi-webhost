@@ -145,6 +145,22 @@ export function useAgent() {
           s.setActiveSessionId(data.data.activeSessionId);
         }
       }
+      if (data.command === "rename_session" && data.success) {
+        // Update the name in savedSessions locally
+        const { sessionPath, name } = data.data;
+        s.setSavedSessions(
+          s.savedSessions.map((ss) =>
+            ss.path === sessionPath ? { ...ss, name } : ss,
+          ),
+        );
+      }
+      if (data.command === "delete_session" && data.success) {
+        // Remove from savedSessions locally
+        const { sessionPath } = data.data;
+        s.setSavedSessions(
+          s.savedSessions.filter((ss) => ss.path !== sessionPath),
+        );
+      }
       return;
     }
 
@@ -456,6 +472,20 @@ export function useAgent() {
     [send],
   );
 
+  const renameSession = useCallback(
+    (sessionPath: string, name: string) => {
+      send({ type: "rename_session", sessionPath, name });
+    },
+    [send],
+  );
+
+  const deleteSession = useCallback(
+    (sessionPath: string) => {
+      send({ type: "delete_session", sessionPath });
+    },
+    [send],
+  );
+
   const fetchModels = useCallback(() => {
     send({ type: "get_models" });
   }, [send]);
@@ -499,6 +529,8 @@ export function useAgent() {
     switchSession,
     setActiveSession,
     closeSession,
+    renameSession,
+    deleteSession,
     fetchModels,
     fetchAuthStatus,
   };
