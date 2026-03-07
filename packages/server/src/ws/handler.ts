@@ -30,6 +30,7 @@ type ClientCommand =
   | { type: "switch_session"; sessionPath: string }
   | { type: "set_active_session"; sessionId: string }
   | { type: "close_session"; sessionId: string }
+  | { type: "extension_ui_response"; sessionId: string; requestId: string; response: { value?: string; confirmed?: boolean; cancelled?: boolean } }
   | { type: "attach_session"; sessionId: string }
   | { type: "detach_session"; sessionId: string }
   | { type: "list_active_sessions" }
@@ -94,11 +95,28 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
   function attachToSession(sessionId: string) {
     state.subscribedSessionIds.add(sessionId);
     agentManager.attachClient(sessionId, clientHandle);
+    // Wire extension UI context sender to this WS connection
+    const managed = agentManager.getSession(sessionId);
+    if (managed) {
+      managed.uiContext.setSender((data) => {
+        if (state.ws) {
+          try {
+            send(state.ws, data);
+          } catch {
+            // Client disconnected
+          }
+        }
+      });
+    }
   }
 
   function detachFromSession(sessionId: string) {
     state.subscribedSessionIds.delete(sessionId);
     agentManager.detachClient(sessionId, clientHandle);
+    const managed = agentManager.getSession(sessionId);
+    if (managed) {
+      managed.uiContext.clearSender();
+    }
   }
 
   function sendSessionInfo(ws: WSContext, type: string, sessionId: string, managed: ManagedSession, extra?: Record<string, unknown>) {
@@ -174,6 +192,13 @@ export function createWSHandlers(agentManager: AgentManager): WSEvents {
     },
 
     async onClose() {
+      // Clear extension UI senders for all subscribed sessions
+      for (const id of state.subscribedSessionIds) {
+        const managed = agentManager.getSession(id);
+        if (managed) {
+          managed.uiContext.clearSender();
+        }
+      }
       // Detach from all sessions — sessions stay alive in AgentManager
       agentManager.detachAllForClient(clientHandle);
       state.subscribedSessionIds.clear();
@@ -439,6 +464,19 @@ async function handleCommand(
         data: { activeSessionId: state.activeSessionId },
       });
       sendLiveSessionsList(ws);
+      break;
+    }
+
+    case "extension_ui_response": {
+      const managed = agentManager.getSession(cmd.sessionId);
+      if (!managed) {
+        send(ws, { type: "error", message: `Session not found: ${cmd.sessionId}` });
+        break;
+      }
+      const handled = managed.uiContext.handleResponse(cmd.requestId, cmd.response);
+      if (!handled) {
+        send(ws, { type: "error", message: `No pending dialog with id: ${cmd.requestId}` });
+      }
       break;
     }
 

@@ -1,4 +1,5 @@
 import { Chat } from "./components/Chat";
+import { ExtensionPrompt } from "./components/ExtensionPrompt";
 import { Header } from "./components/Header";
 import { Sidebar } from "./components/Sidebar";
 import { useAgent } from "./hooks/useAgent";
@@ -35,6 +36,8 @@ export function App() {
 
         <Chat agent={agent} />
       </div>
+
+      <ExtensionPrompt agent={agent} />
     </div>
   );
 }

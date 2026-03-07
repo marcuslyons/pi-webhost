@@ -15,6 +15,7 @@ import {
   type AgentSession,
 } from "@mariozechner/pi-coding-agent";
 import { nanoid } from "nanoid";
+import { WebExtensionUIContext } from "../extensions/ui-context.js";
 import { readFile, writeFile, rename, mkdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -35,6 +36,8 @@ export interface ManagedSession {
   session: AgentSession;
   cwd: string;
   createdAt: Date;
+  /** Extension UI context for this session. Set sender when WS attaches. */
+  uiContext: WebExtensionUIContext;
 }
 
 /** Opaque handle for a connected client (used for broadcasting). */
@@ -160,11 +163,15 @@ export class AgentManager {
       settingsManager,
     });
 
+    const uiContext = new WebExtensionUIContext(id);
+    await session.bindExtensions({ uiContext });
+
     const managed: ManagedSession = {
       id,
       session,
       cwd,
       createdAt: new Date(),
+      uiContext,
     };
 
     this.sessions.set(id, managed);
@@ -196,6 +203,8 @@ export class AgentManager {
   async destroySession(id: string): Promise<void> {
     const managed = this.sessions.get(id);
     if (managed) {
+      managed.uiContext.cancelAll();
+      managed.uiContext.clearSender();
       // Clean up internal subscription
       const unsub = this.sessionUnsubscribers.get(id);
       if (unsub) {
@@ -238,11 +247,15 @@ export class AgentManager {
       settingsManager,
     });
 
+    const uiContext = new WebExtensionUIContext(id);
+    await session.bindExtensions({ uiContext });
+
     const managed: ManagedSession = {
       id,
       session,
       cwd,
       createdAt: new Date(),
+      uiContext,
     };
 
     this.sessions.set(id, managed);
