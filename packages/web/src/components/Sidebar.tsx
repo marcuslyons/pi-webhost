@@ -86,7 +86,7 @@ export function Sidebar({ open, onClose, agent }: SidebarProps) {
 
       {/* Sidebar panel */}
       <div
-        className={`fixed inset-y-0 left-0 z-50 w-80 transform bg-zinc-900 border-r border-zinc-800 transition-transform duration-200 lg:relative lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-50 w-full max-w-[320px] transform bg-zinc-900 border-r border-zinc-800 transition-transform duration-200 lg:relative lg:w-80 lg:max-w-none lg:translate-x-0 ${
           open ? "translate-x-0" : "-translate-x-full"
         }`}
       >

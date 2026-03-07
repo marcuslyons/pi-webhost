@@ -162,7 +162,7 @@ export function Editor({ onSend, onAbort }: EditorProps) {
   }, []);
 
   return (
-    <div className="border-t border-zinc-800 bg-zinc-900/50 p-4">
+    <div className="border-t border-zinc-800 bg-zinc-900/50 p-2 sm:p-4">
       {/* Image thumbnails */}
       {images.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-2">

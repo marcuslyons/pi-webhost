@@ -47,7 +47,7 @@ export function Chat({ agent }: ChatProps) {
         {messages.length === 0 ? (
           <EmptyState />
         ) : (
-          <div className="mx-auto max-w-4xl space-y-4 px-4 py-6">
+          <div className="mx-auto max-w-4xl space-y-3 px-2 py-4 sm:space-y-4 sm:px-4 sm:py-6">
             {messages.map((msg) => (
               <Message key={msg.id} message={msg} />
             ))}
