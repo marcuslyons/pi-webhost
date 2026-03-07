@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "../stores/chatStore";
+import { useDirectoryAutocomplete } from "../hooks/useDirectoryAutocomplete";
 
 interface NewSessionDialogProps {
   open: boolean;
@@ -19,7 +20,9 @@ export function NewSessionDialog({ open, onClose, onCreateSession }: NewSessionD
     error?: string;
   } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLUListElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autocomplete = useDirectoryAutocomplete(path);
 
   // Extract unique cwds from saved sessions for quick picks
   const recentDirs = useMemo(() => {
@@ -109,7 +112,7 @@ export function NewSessionDialog({ open, onClose, onCreateSession }: NewSessionD
 
           {/* Body */}
           <div className="p-5 space-y-4">
-            {/* Directory input */}
+            {/* Directory input with autocomplete */}
             <div>
               <label className="mb-1.5 block text-xs font-medium text-zinc-400">
                 Working Directory
@@ -121,14 +124,50 @@ export function NewSessionDialog({ open, onClose, onCreateSession }: NewSessionD
                   value={path}
                   onChange={(e) => setPath(e.target.value)}
                   onKeyDown={(e) => {
+                    if (autocomplete.isOpen && autocomplete.entries.length > 0) {
+                      if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        autocomplete.moveHighlight("down");
+                        return;
+                      }
+                      if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        autocomplete.moveHighlight("up");
+                        return;
+                      }
+                      if (e.key === "Tab" && autocomplete.highlightedIndex >= 0) {
+                        e.preventDefault();
+                        const newPath = autocomplete.accept();
+                        if (newPath) setPath(newPath);
+                        return;
+                      }
+                      if (e.key === "Enter" && autocomplete.highlightedIndex >= 0) {
+                        e.preventDefault();
+                        const newPath = autocomplete.accept();
+                        if (newPath) setPath(newPath);
+                        return;
+                      }
+                    }
                     if (e.key === "Enter" && (validationResult?.valid ?? !path.trim())) {
                       handleCreate();
                     }
-                    if (e.key === "Escape") onClose();
+                    if (e.key === "Escape") {
+                      if (autocomplete.isOpen) {
+                        autocomplete.close();
+                      } else {
+                        onClose();
+                      }
+                    }
+                  }}
+                  onFocus={() => autocomplete.open()}
+                  onBlur={() => {
+                    // Delay to allow click events on dropdown items
+                    setTimeout(() => autocomplete.close(), 200);
                   }}
                   placeholder={serverCwd ?? "/path/to/project"}
                   className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2.5 pr-8 font-mono text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-violet-500 transition-colors"
                   spellCheck={false}
+                  autoComplete="off"
                 />
                 {/* Validation indicator */}
                 <div className="absolute right-2.5 top-1/2 -translate-y-1/2">
@@ -149,12 +188,49 @@ export function NewSessionDialog({ open, onClose, onCreateSession }: NewSessionD
                     )
                   ) : null}
                 </div>
+
+                {/* Autocomplete dropdown */}
+                {autocomplete.isOpen && autocomplete.entries.length > 0 && (
+                  <ul
+                    ref={dropdownRef}
+                    className="absolute left-0 right-0 top-full z-10 mt-1 max-h-48 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-800 py-1 shadow-lg"
+                  >
+                    {autocomplete.entries.map((entry, i) => (
+                      <li key={entry.name}>
+                        <button
+                          type="button"
+                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm font-mono transition-colors ${
+                            i === autocomplete.highlightedIndex
+                              ? "bg-violet-500/20 text-zinc-100"
+                              : entry.name.startsWith(".")
+                                ? "text-zinc-600 hover:bg-zinc-700/50 hover:text-zinc-400"
+                                : "text-zinc-300 hover:bg-zinc-700/50"
+                          }`}
+                          onMouseDown={(e) => {
+                            e.preventDefault(); // Prevent input blur
+                            const newPath = autocomplete.accept(entry);
+                            if (newPath) {
+                              setPath(newPath);
+                              inputRef.current?.focus();
+                            }
+                          }}
+                          onMouseEnter={() => autocomplete.setHighlightedIndex(i)}
+                        >
+                          <svg className="h-3.5 w-3.5 shrink-0 text-zinc-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                          </svg>
+                          <span className="truncate">{entry.name}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
               {/* Validation message */}
-              {validationResult && !validationResult.valid && (
+              {validationResult && !validationResult.valid && !autocomplete.isOpen && (
                 <p className="mt-1.5 text-xs text-red-400">{validationResult.error}</p>
               )}
-              {validationResult?.valid && validationResult.resolved && validationResult.resolved !== path && (
+              {validationResult?.valid && validationResult.resolved && validationResult.resolved !== path && !autocomplete.isOpen && (
                 <p className="mt-1.5 text-xs text-zinc-500">
                   → {shortenPath(validationResult.resolved)}
                 </p>

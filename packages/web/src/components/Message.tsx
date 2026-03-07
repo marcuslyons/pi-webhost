@@ -15,7 +15,7 @@ export const Message = memo(function Message({ message }: MessageProps) {
     case "user":
       return (
         <div className="flex justify-end">
-          <div className="max-w-[80%] rounded-2xl rounded-br-md bg-violet-600/20 border border-violet-500/20 px-4 py-2.5">
+          <div className="max-w-[90%] sm:max-w-[80%] rounded-2xl rounded-br-md bg-violet-600/20 border border-violet-500/20 px-3 py-2 sm:px-4 sm:py-2.5">
             <div className="prose-chat text-sm text-zinc-200 whitespace-pre-wrap">
               {message.content}
             </div>
@@ -26,7 +26,7 @@ export const Message = memo(function Message({ message }: MessageProps) {
     case "assistant":
       return (
         <div className="flex justify-start">
-          <div className="max-w-[85%] space-y-2">
+          <div className="max-w-[95%] sm:max-w-[85%] space-y-2">
             {/* Model badge */}
             {message.model && (
               <span className="text-[10px] font-medium text-zinc-600 uppercase tracking-wider">
@@ -72,14 +72,25 @@ export const Message = memo(function Message({ message }: MessageProps) {
                 <span className="text-zinc-500">...</span>
               ) : null}
             </div>
+
+            {/* Per-message usage label */}
+            {message.usage && !message.isStreaming && (
+              <div className="text-[10px] font-mono text-zinc-600">
+                ↑{abbreviateTokens(message.usage.input)} ↓{abbreviateTokens(message.usage.output)}
+                {" · "}
+                {message.usage.cost.total < 0.01 && message.usage.cost.total > 0
+                  ? `$${message.usage.cost.total.toFixed(4)}`
+                  : `$${message.usage.cost.total.toFixed(3)}`}
+              </div>
+            )}
           </div>
         </div>
       );
 
     case "tool_call":
       return (
-        <div className="flex justify-start pl-4">
-          <div className="max-w-[85%] rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2">
+        <div className="flex justify-start pl-2 sm:pl-4">
+          <div className="max-w-[95%] sm:max-w-[85%] rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2">
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-mono font-medium text-amber-500/80 uppercase">
                 {message.toolName}
@@ -94,8 +105,8 @@ export const Message = memo(function Message({ message }: MessageProps) {
 
     case "tool_result":
       return (
-        <div className="flex justify-start pl-4">
-          <div className="max-w-[85%] rounded-lg border border-zinc-800 bg-zinc-900/30">
+        <div className="flex justify-start pl-2 sm:pl-4">
+          <div className="max-w-[95%] sm:max-w-[85%] rounded-lg border border-zinc-800 bg-zinc-900/30">
             <button
               onClick={() => setToolExpanded(!toolExpanded)}
               className={`flex w-full items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
@@ -145,3 +156,9 @@ export const Message = memo(function Message({ message }: MessageProps) {
       return null;
   }
 });
+
+function abbreviateTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}

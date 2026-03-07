@@ -1,5 +1,5 @@
 import { useChatStore } from "../stores/chatStore";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { LiveSessionInfo, SavedSessionInfo } from "../lib/types";
 
 interface SidebarProps {
@@ -12,6 +12,8 @@ interface SidebarProps {
     setActiveSession: (sessionId: string) => void;
     closeSession: (sessionId: string) => void;
     newSession: (cwd?: string) => void;
+    renameSession: (sessionPath: string, name: string) => void;
+    deleteSession: (sessionPath: string) => void;
   };
 }
 
@@ -84,7 +86,7 @@ export function Sidebar({ open, onClose, agent }: SidebarProps) {
 
       {/* Sidebar panel */}
       <div
-        className={`fixed inset-y-0 left-0 z-50 w-80 transform bg-zinc-900 border-r border-zinc-800 transition-transform duration-200 lg:relative lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-50 w-full max-w-[320px] transform bg-zinc-900 border-r border-zinc-800 transition-transform duration-200 lg:relative lg:w-80 lg:max-w-none lg:translate-x-0 ${
           open ? "translate-x-0" : "-translate-x-full"
         }`}
       >
@@ -141,6 +143,8 @@ export function Sidebar({ open, onClose, agent }: SidebarProps) {
                 onCloseLive={(id) => agent.closeSession(id)}
                 onNew={handleNewSession}
                 onRefresh={() => agent.listSessions()}
+                onRename={(path, name) => agent.renameSession(path, name)}
+                onDelete={(path) => agent.deleteSession(path)}
               />
             ) : (
               <SettingsTab
@@ -170,6 +174,8 @@ function SessionsTab({
   onCloseLive,
   onNew,
   onRefresh,
+  onRename,
+  onDelete,
 }: {
   liveSessions: LiveSessionInfo[];
   savedSessions: SavedSessionInfo[];
@@ -180,6 +186,8 @@ function SessionsTab({
   onCloseLive: (sessionId: string) => void;
   onNew: () => void;
   onRefresh: () => void;
+  onRename: (sessionPath: string, name: string) => void;
+  onDelete: (sessionPath: string) => void;
 }) {
   // Filter saved sessions that are already open as live sessions
   const liveSessionPaths = new Set(liveSessions.map((ls) => ls.sessionPath).filter(Boolean));
@@ -248,6 +256,9 @@ function SessionsTab({
                       {shortenCwd(session.cwd)}
                       {" · "}
                       {session.messageCount} msg{session.messageCount !== 1 ? "s" : ""}
+                      {session.cost != null && session.cost > 0 && (
+                        <>{" · "}${session.cost < 0.01 ? session.cost.toFixed(4) : session.cost.toFixed(2)}</>
+                      )}
                       {session.isStreaming ? " · streaming" : ""}
                     </span>
                   </button>
@@ -313,37 +324,166 @@ function SessionsTab({
         )}
 
         <div className="space-y-1">
-          {nonLiveSavedSessions.map((session) => {
-            const modified = new Date(session.modified);
-            const timeStr = formatRelativeTime(modified);
-
-            return (
-              <button
-                key={session.path}
-                onClick={() => onSwitchSaved(session)}
-                className="group flex w-full flex-col gap-1 rounded-lg px-3 py-2.5 text-left hover:bg-zinc-800/70 border border-transparent transition-colors"
-              >
-                <span className="truncate text-sm font-medium text-zinc-300 group-hover:text-zinc-100">
-                  {session.name || truncateMessage(session.firstMessage) || "Untitled"}
-                </span>
-                <div className="flex items-center gap-2 text-[10px] text-zinc-600">
-                  <span>{timeStr}</span>
-                  <span>·</span>
-                  <span>{session.messageCount} msg{session.messageCount !== 1 ? "s" : ""}</span>
-                  {session.name && session.firstMessage && (
-                    <>
-                      <span>·</span>
-                      <span className="truncate max-w-[140px]">
-                        {truncateMessage(session.firstMessage)}
-                      </span>
-                    </>
-                  )}
-                </div>
-              </button>
-            );
-          })}
+          {nonLiveSavedSessions.map((session) => (
+            <SavedSessionItem
+              key={session.path}
+              session={session}
+              onSwitch={onSwitchSaved}
+              onRename={onRename}
+              onDelete={onDelete}
+            />
+          ))}
         </div>
       </section>
+    </div>
+  );
+}
+
+// ── Saved Session Item (with rename/delete) ──────────────────────────
+
+function SavedSessionItem({
+  session,
+  onSwitch,
+  onRename,
+  onDelete,
+}: {
+  session: SavedSessionInfo;
+  onSwitch: (session: SavedSessionInfo) => void;
+  onRename: (sessionPath: string, name: string) => void;
+  onDelete: (sessionPath: string) => void;
+}) {
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
+  const modified = new Date(session.modified);
+  const timeStr = formatRelativeTime(modified);
+  const displayName = session.name || truncateMessage(session.firstMessage) || "Untitled";
+
+  const startRename = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRenameValue(session.name ?? "");
+    setIsRenaming(true);
+    // Focus after render
+    setTimeout(() => renameInputRef.current?.focus(), 0);
+  };
+
+  const confirmRename = () => {
+    const trimmed = renameValue.trim();
+    if (trimmed && trimmed !== session.name) {
+      onRename(session.path, trimmed);
+    }
+    setIsRenaming(false);
+  };
+
+  const cancelRename = () => {
+    setIsRenaming(false);
+  };
+
+  const startDelete = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsConfirmingDelete(true);
+  };
+
+  const confirmDelete = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onDelete(session.path);
+    setIsConfirmingDelete(false);
+  };
+
+  const cancelDelete = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsConfirmingDelete(false);
+  };
+
+  if (isConfirmingDelete) {
+    return (
+      <div className="flex flex-col gap-2 rounded-lg border border-red-500/30 bg-red-950/20 px-3 py-2.5">
+        <span className="text-xs text-red-400">Delete this session? This cannot be undone.</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={confirmDelete}
+            className="rounded px-2.5 py-1 text-xs font-medium bg-red-600 text-white hover:bg-red-500 transition-colors"
+          >
+            Delete
+          </button>
+          <button
+            onClick={cancelDelete}
+            className="rounded px-2.5 py-1 text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group flex w-full items-center gap-1 rounded-lg px-3 py-2.5 text-left hover:bg-zinc-800/70 border border-transparent transition-colors">
+      <button
+        onClick={() => onSwitch(session)}
+        className="flex flex-1 flex-col gap-1 min-w-0"
+      >
+        {isRenaming ? (
+          <input
+            ref={renameInputRef}
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") confirmRename();
+              if (e.key === "Escape") cancelRename();
+            }}
+            onBlur={confirmRename}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full rounded border border-violet-500/50 bg-zinc-800 px-1.5 py-0.5 text-sm text-zinc-200 outline-none"
+            placeholder="Session name"
+          />
+        ) : (
+          <span className="truncate text-sm font-medium text-zinc-300 group-hover:text-zinc-100">
+            {displayName}
+          </span>
+        )}
+        <div className="flex items-center gap-2 text-[10px] text-zinc-600">
+          <span>{timeStr}</span>
+          <span>·</span>
+          <span>{session.messageCount} msg{session.messageCount !== 1 ? "s" : ""}</span>
+          {session.name && session.firstMessage && (
+            <>
+              <span>·</span>
+              <span className="truncate max-w-[140px]">
+                {truncateMessage(session.firstMessage)}
+              </span>
+            </>
+          )}
+        </div>
+      </button>
+
+      {/* Action buttons (visible on hover) */}
+      {!isRenaming && (
+        <div className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          {/* Rename button */}
+          <button
+            onClick={startRename}
+            className="rounded p-1 text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700 transition-all"
+            title="Rename session"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            </svg>
+          </button>
+          {/* Delete button */}
+          <button
+            onClick={startDelete}
+            className="rounded p-1 text-zinc-600 hover:text-red-400 hover:bg-zinc-700 transition-all"
+            title="Delete session"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

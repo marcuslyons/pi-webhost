@@ -3,10 +3,11 @@ import { useChatStore } from "../stores/chatStore";
 import { Message } from "./Message";
 import { Editor } from "./Editor";
 import type { ChatMessage } from "../lib/types";
+import { Footer } from "./Footer";
 
 interface ChatProps {
   agent: {
-    sendPrompt: (message: string) => void;
+    sendPrompt: (message: string, images?: Array<{ data: string; mimeType: string }>) => void;
     abort: () => void;
   };
 }
@@ -188,7 +189,7 @@ export function Chat({ agent }: ChatProps) {
         {messages.length === 0 ? (
           <EmptyState />
         ) : (
-          <div className="mx-auto max-w-4xl space-y-4 px-4 py-6">
+          <div className="mx-auto max-w-4xl space-y-3 px-2 py-4 sm:space-y-4 sm:px-4 sm:py-6">
             {messages.map((msg) => {
               const isMatch = matchSet.has(msg.id);
               const isCurrent = matchingIds[currentMatchIndex] === msg.id;
@@ -215,6 +216,9 @@ export function Chat({ agent }: ChatProps) {
       <div className="mx-auto w-full max-w-4xl">
         <Editor onSend={agent.sendPrompt} onAbort={agent.abort} />
       </div>
+
+      {/* Telemetry footer */}
+      <Footer />
     </div>
   );
 }
