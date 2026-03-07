@@ -1,12 +1,14 @@
 import { create } from "zustand";
 import type {
   ChatMessage,
+  ContextUsage,
   ExtensionNotification,
   ExtensionUIDialog,
   LiveSessionInfo,
   ModelInfo,
   SavedSessionInfo,
   SessionData,
+  SessionStats,
   ThinkingLevel,
   ToolExecution,
 } from "../lib/types";
@@ -90,6 +92,11 @@ interface ChatStore {
   extensionNotifications: ExtensionNotification[];
   addExtensionNotification: (notification: ExtensionNotification) => void;
   removeExtensionNotification: (id: string) => void;
+
+  // Per-session telemetry
+  sessionStatsMap: Map<string, { stats: SessionStats; context: ContextUsage | null }>;
+  setSessionStats: (sessionId: string, stats: SessionStats, context: ContextUsage | null) => void;
+  getActiveStats: () => { stats: SessionStats; context: ContextUsage | null } | null;
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
@@ -233,4 +240,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => ({
       extensionNotifications: state.extensionNotifications.filter((n) => n.id !== id),
     })),
+
+  // Per-session telemetry
+  sessionStatsMap: new Map(),
+  setSessionStats: (sessionId, stats, context) =>
+    set((state) => {
+      const map = new Map(state.sessionStatsMap);
+      map.set(sessionId, { stats, context });
+      return { sessionStatsMap: map };
+    }),
+  getActiveStats: () => {
+    const { activeSessionId, sessionStatsMap } = get();
+    if (!activeSessionId) return null;
+    return sessionStatsMap.get(activeSessionId) ?? null;
+  },
 }));

@@ -18,6 +18,22 @@ export interface ModelInfo {
 }
 
 // Messages displayed in the chat UI
+/** Per-message token/cost usage (from Pi's AssistantMessage.usage). */
+export interface MessageUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "tool_call" | "tool_result" | "system";
@@ -27,6 +43,7 @@ export interface ChatMessage {
   model?: string;
   thinkingContent?: string;
   isStreaming?: boolean;
+  usage?: MessageUsage;
   // Tool-specific
   toolName?: string;
   toolCallId?: string;
@@ -64,6 +81,29 @@ export interface SavedSessionInfo {
   firstMessage: string;
 }
 
+/** Token and cost statistics for a session. */
+export interface SessionStats {
+  tokens: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+  cost: number;
+  userMessages: number;
+  assistantMessages: number;
+  toolCalls: number;
+  totalMessages: number;
+}
+
+/** Context window usage for a session. */
+export interface ContextUsage {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}
+
 /** A session that's currently alive in this browser tab. */
 export interface LiveSessionInfo {
   id: string;
@@ -72,6 +112,7 @@ export interface LiveSessionInfo {
   isStreaming: boolean;
   model: ModelInfo | null;
   messageCount: number;
+  cost?: number;
 }
 
 /** Per-session data cached on the client. */
