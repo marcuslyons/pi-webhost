@@ -58,6 +58,11 @@ export function useAgent() {
   const handleServerMessage = useCallback((data: any) => {
     const s = store();
 
+    if (data.type === "stats_update") {
+      s.setSessionStats(data.sessionId, data.stats, data.context);
+      return;
+    }
+
     if (data.type === "session_created") {
       const sid = data.sessionId;
       s.ensureSessionData(sid);
@@ -66,6 +71,9 @@ export function useAgent() {
       s.setActiveSessionPath(data.sessionPath ?? null);
       s.setActiveCwd(data.cwd ?? null);
       s.setActiveIsStreaming(false);
+      if (data.stats) {
+        s.setSessionStats(sid, data.stats, data.context ?? null);
+      }
       return;
     }
 
@@ -78,6 +86,9 @@ export function useAgent() {
       s.setActiveCwd(data.cwd ?? null);
       s.setActiveThinkingLevel(data.thinkingLevel ?? "off");
       s.setActiveIsStreaming(false);
+      if (data.stats) {
+        s.setSessionStats(sid, data.stats, data.context ?? null);
+      }
 
       // Rebuild messages from loaded history
       if (data.messages?.length) {
@@ -133,6 +144,22 @@ export function useAgent() {
         if (data.data?.activeSessionId) {
           s.setActiveSessionId(data.data.activeSessionId);
         }
+      }
+      if (data.command === "rename_session" && data.success) {
+        // Update the name in savedSessions locally
+        const { sessionPath, name } = data.data;
+        s.setSavedSessions(
+          s.savedSessions.map((ss) =>
+            ss.path === sessionPath ? { ...ss, name } : ss,
+          ),
+        );
+      }
+      if (data.command === "delete_session" && data.success) {
+        // Remove from savedSessions locally
+        const { sessionPath } = data.data;
+        s.setSavedSessions(
+          s.savedSessions.filter((ss) => ss.path !== sessionPath),
+        );
       }
       return;
     }
@@ -208,7 +235,20 @@ export function useAgent() {
       case "message_end": {
         const data = s.getSessionData(sessionId);
         if (data.currentAssistantId) {
-          s.updateMessage(sessionId, data.currentAssistantId, { isStreaming: false });
+          const update: Partial<import("../lib/types").ChatMessage> = { isStreaming: false };
+          // Extract per-message usage from the assistant message
+          const msg = event.message;
+          if (msg?.role === "assistant" && msg.usage) {
+            update.usage = {
+              input: msg.usage.input,
+              output: msg.usage.output,
+              cacheRead: msg.usage.cacheRead,
+              cacheWrite: msg.usage.cacheWrite,
+              totalTokens: msg.usage.totalTokens,
+              cost: msg.usage.cost,
+            };
+          }
+          s.updateMessage(sessionId, data.currentAssistantId, update);
         }
         break;
       }
@@ -321,7 +361,7 @@ export function useAgent() {
   // ── Public API ────────────────────────────────────────────────────
 
   const sendPrompt = useCallback(
-    (message: string) => {
+    (message: string, images?: Array<{ data: string; mimeType: string }>) => {
       const s = store();
       const sid = s.activeSessionId;
 
@@ -339,7 +379,9 @@ export function useAgent() {
         send({ type: "follow_up", message, sessionId: sid });
       } else {
         // If no active session, prompt will auto-create one on the server
-        send({ type: "prompt", message, sessionId: sid });
+        const promptCmd: any = { type: "prompt", message, sessionId: sid };
+        if (images?.length) promptCmd.images = images;
+        send(promptCmd);
 
         // If we didn't have a session, add user message after creation
         if (!sid) {
@@ -432,6 +474,20 @@ export function useAgent() {
     [send],
   );
 
+  const renameSession = useCallback(
+    (sessionPath: string, name: string) => {
+      send({ type: "rename_session", sessionPath, name });
+    },
+    [send],
+  );
+
+  const deleteSession = useCallback(
+    (sessionPath: string) => {
+      send({ type: "delete_session", sessionPath });
+    },
+    [send],
+  );
+
   const fetchModels = useCallback(() => {
     send({ type: "get_models" });
   }, [send]);
@@ -475,6 +531,8 @@ export function useAgent() {
     switchSession,
     setActiveSession,
     closeSession,
+    renameSession,
+    deleteSession,
     fetchModels,
     fetchAuthStatus,
   };

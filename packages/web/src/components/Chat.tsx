@@ -2,10 +2,11 @@ import { useEffect, useRef } from "react";
 import { useChatStore } from "../stores/chatStore";
 import { Message } from "./Message";
 import { Editor } from "./Editor";
+import { Footer } from "./Footer";
 
 interface ChatProps {
   agent: {
-    sendPrompt: (message: string) => void;
+    sendPrompt: (message: string, images?: Array<{ data: string; mimeType: string }>) => void;
     abort: () => void;
   };
 }
@@ -59,6 +60,9 @@ export function Chat({ agent }: ChatProps) {
       <div className="mx-auto w-full max-w-4xl">
         <Editor onSend={agent.sendPrompt} onAbort={agent.abort} />
       </div>
+
+      {/* Telemetry footer */}
+      <Footer />
     </div>
   );
 }

@@ -4,7 +4,8 @@
 
 import { Hono } from "hono";
 import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { readdir } from "node:fs/promises";
+import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 import type { AgentManager } from "../agent/manager.js";
 
@@ -83,6 +84,53 @@ export function createApiRoutes(agentManager: AgentManager) {
       return c.json({ valid: true, resolved });
     } catch (err) {
       return c.json({ valid: false, error: String(err) });
+    }
+  });
+
+  // List directory contents for autocomplete
+  api.get("/list-dir", async (c) => {
+    const rawPath = c.req.query("path") ?? "~";
+    const prefix = c.req.query("prefix") ?? "";
+
+    try {
+      const resolved = resolve(rawPath.replace(/^~/, homedir()));
+
+      if (!existsSync(resolved)) {
+        return c.json({ entries: [], resolved, error: "Directory not found" });
+      }
+
+      const stat = statSync(resolved);
+      if (!stat.isDirectory()) {
+        return c.json({ entries: [], resolved, error: "Not a directory" });
+      }
+
+      const dirents = await readdir(resolved, { withFileTypes: true });
+      const prefixLower = prefix.toLowerCase();
+      const showDotfiles = prefix.startsWith(".");
+
+      let entries = dirents
+        .filter((d) => {
+          if (!d.isDirectory()) return false;
+          if (!showDotfiles && d.name.startsWith(".")) return false;
+          if (prefixLower && !d.name.toLowerCase().startsWith(prefixLower)) return false;
+          return true;
+        })
+        .map((d) => ({ name: d.name, isDir: true as const }))
+        .sort((a, b) => {
+          // Dotfiles last (unless prefix starts with .)
+          const aDot = a.name.startsWith(".");
+          const bDot = b.name.startsWith(".");
+          if (aDot !== bDot) return aDot ? 1 : -1;
+          return a.name.localeCompare(b.name);
+        })
+        .slice(0, 50);
+
+      return c.json({ entries, resolved });
+    } catch (err: any) {
+      if (err.code === "EACCES") {
+        return c.json({ entries: [], error: "Permission denied" });
+      }
+      return c.json({ entries: [], error: String(err) });
     }
   });
 

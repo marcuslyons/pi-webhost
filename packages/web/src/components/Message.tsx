@@ -72,6 +72,17 @@ export const Message = memo(function Message({ message }: MessageProps) {
                 <span className="text-zinc-500">...</span>
               ) : null}
             </div>
+
+            {/* Per-message usage label */}
+            {message.usage && !message.isStreaming && (
+              <div className="text-[10px] font-mono text-zinc-600">
+                ↑{abbreviateTokens(message.usage.input)} ↓{abbreviateTokens(message.usage.output)}
+                {" · "}
+                {message.usage.cost.total < 0.01 && message.usage.cost.total > 0
+                  ? `$${message.usage.cost.total.toFixed(4)}`
+                  : `$${message.usage.cost.total.toFixed(3)}`}
+              </div>
+            )}
           </div>
         </div>
       );
@@ -145,3 +156,9 @@ export const Message = memo(function Message({ message }: MessageProps) {
       return null;
   }
 });
+
+function abbreviateTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
