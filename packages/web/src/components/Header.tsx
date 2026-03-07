@@ -7,6 +7,7 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 
 interface HeaderProps {
   onMenuClick: () => void;
+  onCommandPalette?: () => void;
   agent: {
     setModel: (provider: string, modelId: string) => void;
     setThinkingLevel: (level: ThinkingLevel) => void;
@@ -15,7 +16,7 @@ interface HeaderProps {
   };
 }
 
-export function Header({ onMenuClick, agent }: HeaderProps) {
+export function Header({ onMenuClick, onCommandPalette, agent }: HeaderProps) {
   const activeModel = useChatStore((s) => s.activeModel);
   const thinkingLevel = useChatStore((s) => s.activeThinkingLevel);
   const isStreaming = useChatStore((s) => s.activeIsStreaming);
@@ -171,6 +172,20 @@ export function Header({ onMenuClick, agent }: HeaderProps) {
               className="rounded-md bg-red-900/50 px-2.5 py-1.5 text-xs text-red-300 hover:bg-red-900/80 transition-colors"
             >
               Stop
+            </button>
+          )}
+
+          {/* Command palette */}
+          {onCommandPalette && (
+            <button
+              onClick={onCommandPalette}
+              className="rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors hidden sm:flex items-center gap-1"
+              title="Command palette (Cmd+K)"
+            >
+              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+              <kbd className="text-[10px] text-zinc-600">⌘K</kbd>
             </button>
           )}
 

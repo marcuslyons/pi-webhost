@@ -591,6 +591,13 @@ export function useAgent() {
     [send],
   );
 
+  const compact = useCallback(() => {
+    const sid = store().activeSessionId;
+    if (sid) {
+      send({ type: "compact", sessionId: sid });
+    }
+  }, [send]);
+
   const fetchModels = useCallback(() => {
     send({ type: "get_models" });
   }, [send]);
@@ -627,6 +634,7 @@ export function useAgent() {
   return {
     sendPrompt,
     abort,
+    compact,
     setModel,
     setThinkingLevel,
     newSession,
