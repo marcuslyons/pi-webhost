@@ -30,6 +30,19 @@ Tasks: [`docs/plans/feature-tasks.md`](docs/plans/feature-tasks.md)
 
 ## Up Next
 
+### UX Improvements (inspired by [Tau](https://github.com/deflating/tau))
+
+Several UX patterns borrowed from Tau, a Pi extension that mirrors terminal sessions in the browser. Different architecture but great feature ideas.
+
+- **Inline diff viewer** — render edit tool calls as red/green diffs instead of raw JSON
+- **Message queuing** — keep input enabled during streaming, show queued messages as dismissible pills, auto-send when agent finishes
+- **PWA / installable app** — service worker + web manifest for standalone install on iOS/Android/macOS
+- **Voice input** — mic button with Web Speech API for on-device dictation
+- **Command palette** — Cmd+K palette for power-user actions (compact, stats, search, new session)
+- **Tab title notifications** — unread message count in browser tab when backgrounded
+
+Tasks: [`docs/plans/feature-tasks-v2.md`](docs/plans/feature-tasks-v2.md)
+
 ### Svelte 5 Migration
 
 > Replace React + Zustand with Svelte 5 runes. Server untouched.
@@ -38,3 +51,14 @@ Tasks: [`docs/plans/feature-tasks.md`](docs/plans/feature-tasks.md)
 
 Plan: [`docs/plans/svelte-migration.md`](docs/plans/svelte-migration.md)
 Analysis: [`docs/svelte-migration-analysis.md`](docs/svelte-migration-analysis.md)
+
+## Exploring
+
+Bigger ideas worth investigating. The first three are inspired by [Tau](https://github.com/deflating/tau)'s roadmap — credit to that project for surfacing them.
+
+- **File browser sidebar** *(Tau)* — lazy-loaded file tree in a right sidebar. Navigate directories, open files natively, drag files onto the input to insert paths. Builds on existing directory autocomplete.
+- **File preview panel** *(Tau)* — context-aware split pane for files the agent is editing. Code with syntax highlighting, image previews, live HTML iframe preview. Auto-show when a file gets edited.
+- **Conversation fork/branch visualization** *(Tau)* — Pi already has fork support in the RPC. Visualize the conversation as a tree, go back to any point and try a different approach. Like git for conversations.
+- **Cost dashboard** — spending over time, per model, per project. Charts and trends. Telemetry data already captured per message and per session.
+- **Theme system** — multiple dark and light themes with OS preference detection. Currently dark-only.
+- **Session templates** — start a new session pre-loaded with context for a specific project. Working directory, starter prompt, model preset.
