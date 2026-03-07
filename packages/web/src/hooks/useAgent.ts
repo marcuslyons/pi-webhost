@@ -20,6 +20,37 @@ export function useAgent() {
 
   const store = useChatStore.getState;
 
+  // ── localStorage session tracking ─────────────────────────────────
+
+  const STORAGE_KEY = "pi-webhost-sessions";
+
+  function saveSessionState() {
+    const s = store();
+    const data = {
+      subscribedSessionIds: Array.from(s.sessionDataMap.keys()),
+      activeSessionId: s.activeSessionId,
+    };
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch { /* localStorage full or unavailable */ }
+  }
+
+  function loadSessionState(): { subscribedSessionIds: string[]; activeSessionId: string | null } | null {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  /** On connect/reconnect, try to reattach to server sessions. */
+  function attemptReattach() {
+    // Ask the server what sessions exist
+    send({ type: "list_active_sessions" });
+  }
+
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
@@ -33,6 +64,7 @@ export function useAgent() {
       fetchModels();
       fetchAuthStatus();
       fetchServerInfo();
+      attemptReattach();
     };
 
     ws.onclose = () => {
@@ -58,6 +90,11 @@ export function useAgent() {
   const handleServerMessage = useCallback((data: any) => {
     const s = store();
 
+    if (data.type === "stats_update") {
+      s.setSessionStats(data.sessionId, data.stats, data.context);
+      return;
+    }
+
     if (data.type === "session_created") {
       const sid = data.sessionId;
       s.ensureSessionData(sid);
@@ -66,6 +103,10 @@ export function useAgent() {
       s.setActiveSessionPath(data.sessionPath ?? null);
       s.setActiveCwd(data.cwd ?? null);
       s.setActiveIsStreaming(false);
+      if (data.stats) {
+        s.setSessionStats(sid, data.stats, data.context ?? null);
+      }
+      saveSessionState();
       return;
     }
 
@@ -78,12 +119,16 @@ export function useAgent() {
       s.setActiveCwd(data.cwd ?? null);
       s.setActiveThinkingLevel(data.thinkingLevel ?? "off");
       s.setActiveIsStreaming(false);
+      if (data.stats) {
+        s.setSessionStats(sid, data.stats, data.context ?? null);
+      }
 
       // Rebuild messages from loaded history
       if (data.messages?.length) {
         const msgs = buildMessagesFromHistory(data.messages);
         s.setMessages(sid, msgs);
       }
+      saveSessionState();
       return;
     }
 
@@ -128,11 +173,46 @@ export function useAgent() {
           s.setActiveIsStreaming(live.isStreaming);
         }
       }
+      if (data.command === "list_active_sessions" && data.success) {
+        // Reattach to sessions that exist on both client and server
+        const serverSessions: Array<{ id: string }> = data.data?.sessions ?? [];
+        const serverIds = new Set(serverSessions.map((s: any) => s.id));
+        const saved = loadSessionState();
+
+        if (saved && saved.subscribedSessionIds.length > 0) {
+          for (const sid of saved.subscribedSessionIds) {
+            if (serverIds.has(sid)) {
+              send({ type: "attach_session", sessionId: sid });
+            }
+          }
+          // Restore active session if it still exists
+          if (saved.activeSessionId && serverIds.has(saved.activeSessionId)) {
+            // Will be set when attach_session response arrives
+          }
+        }
+      }
       if (data.command === "close_session" && data.success) {
         s.removeSessionData(data.data?.closedSessionId);
         if (data.data?.activeSessionId) {
           s.setActiveSessionId(data.data.activeSessionId);
         }
+        saveSessionState();
+      }
+      if (data.command === "rename_session" && data.success) {
+        // Update the name in savedSessions locally
+        const { sessionPath, name } = data.data;
+        s.setSavedSessions(
+          s.savedSessions.map((ss) =>
+            ss.path === sessionPath ? { ...ss, name } : ss,
+          ),
+        );
+      }
+      if (data.command === "delete_session" && data.success) {
+        // Remove from savedSessions locally
+        const { sessionPath } = data.data;
+        s.setSavedSessions(
+          s.savedSessions.filter((ss) => ss.path !== sessionPath),
+        );
       }
       return;
     }
@@ -208,7 +288,20 @@ export function useAgent() {
       case "message_end": {
         const data = s.getSessionData(sessionId);
         if (data.currentAssistantId) {
-          s.updateMessage(sessionId, data.currentAssistantId, { isStreaming: false });
+          const update: Partial<import("../lib/types").ChatMessage> = { isStreaming: false };
+          // Extract per-message usage from the assistant message
+          const msg = event.message;
+          if (msg?.role === "assistant" && msg.usage) {
+            update.usage = {
+              input: msg.usage.input,
+              output: msg.usage.output,
+              cacheRead: msg.usage.cacheRead,
+              cacheWrite: msg.usage.cacheWrite,
+              totalTokens: msg.usage.totalTokens,
+              cost: msg.usage.cost,
+            };
+          }
+          s.updateMessage(sessionId, data.currentAssistantId, update);
         }
         break;
       }
@@ -321,7 +414,7 @@ export function useAgent() {
   // ── Public API ────────────────────────────────────────────────────
 
   const sendPrompt = useCallback(
-    (message: string) => {
+    (message: string, images?: Array<{ data: string; mimeType: string }>) => {
       const s = store();
       const sid = s.activeSessionId;
 
@@ -339,7 +432,9 @@ export function useAgent() {
         send({ type: "follow_up", message, sessionId: sid });
       } else {
         // If no active session, prompt will auto-create one on the server
-        send({ type: "prompt", message, sessionId: sid });
+        const promptCmd: any = { type: "prompt", message, sessionId: sid };
+        if (images?.length) promptCmd.images = images;
+        send(promptCmd);
 
         // If we didn't have a session, add user message after creation
         if (!sid) {
@@ -432,6 +527,20 @@ export function useAgent() {
     [send],
   );
 
+  const renameSession = useCallback(
+    (sessionPath: string, name: string) => {
+      send({ type: "rename_session", sessionPath, name });
+    },
+    [send],
+  );
+
+  const deleteSession = useCallback(
+    (sessionPath: string) => {
+      send({ type: "delete_session", sessionPath });
+    },
+    [send],
+  );
+
   const fetchModels = useCallback(() => {
     send({ type: "get_models" });
   }, [send]);
@@ -475,6 +584,8 @@ export function useAgent() {
     switchSession,
     setActiveSession,
     closeSession,
+    renameSession,
+    deleteSession,
     fetchModels,
     fetchAuthStatus,
   };

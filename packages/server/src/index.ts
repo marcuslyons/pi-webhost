@@ -60,6 +60,16 @@ if (!DEV) {
   app.get("*", serveStatic({ root: "../web/dist", path: "index.html" }));
 }
 
+// Restore sessions from manifest before accepting connections
+agentManager.loadManifest().then(() => {
+  const restored = agentManager.listSessions().length;
+  if (restored > 0) {
+    console.log(`[startup] Restored ${restored} session(s) from manifest`);
+  }
+}).catch((err) => {
+  console.warn("[startup] Manifest load error:", err);
+});
+
 // TLS configuration
 const tlsCertPath = process.env.PI_WEBHOST_TLS_CERT;
 const tlsKeyPath = process.env.PI_WEBHOST_TLS_KEY;
