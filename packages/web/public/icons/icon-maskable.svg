@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Maskable icon: content within safe zone (80% inner area) -->
+  <rect width="512" height="512" fill="#18181b"/>
+  <g transform="translate(105, 105) scale(2.35)">
+    <rect x="10" y="16" width="108" height="96" rx="10" stroke="#a78bfa" stroke-width="3.5" fill="none"/>
+    <line x1="10" y1="36" x2="118" y2="36" stroke="#a78bfa" stroke-width="3.5"/>
+    <circle cx="24" cy="26" r="3" fill="#a78bfa" opacity="0.4"/>
+    <circle cx="35" cy="26" r="3" fill="#a78bfa" opacity="0.4"/>
+    <circle cx="46" cy="26" r="3" fill="#a78bfa" opacity="0.4"/>
+    <path d="M36 60 L50 72 L36 84" stroke="#a78bfa" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <line x1="58" y1="68" x2="92" y2="68" stroke="#a78bfa" stroke-width="5" stroke-linecap="round" opacity="0.5"/>
+    <line x1="58" y1="80" x2="78" y2="80" stroke="#a78bfa" stroke-width="5" stroke-linecap="round" opacity="0.3"/>
+  </g>
+</svg>
