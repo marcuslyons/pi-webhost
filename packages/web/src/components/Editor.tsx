@@ -17,6 +17,12 @@ interface PendingImage {
   preview: string; // data URL for thumbnail
 }
 
+interface QueuedMessage {
+  id: number;
+  text: string;
+  images?: Array<{ data: string; mimeType: string }>;
+}
+
 const SUPPORTED_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_IMAGES = 5;
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
@@ -26,13 +32,17 @@ interface EditorProps {
   onAbort: () => void;
 }
 
+let queueIdCounter = 0;
+
 export function Editor({ onSend, onAbort }: EditorProps) {
   const [input, setInput] = useState("");
   const [images, setImages] = useState<PendingImage[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
+  const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isStreaming = useChatStore((s) => s.activeIsStreaming);
+  const prevStreamingRef = useRef(isStreaming);
 
   const imageIdCounter = useRef(0);
 
@@ -98,6 +108,23 @@ export function Editor({ onSend, onAbort }: EditorProps) {
     setIsRecording(true);
   }, [isRecording, input]);
 
+  // Auto-flush queue when streaming stops
+  useEffect(() => {
+    const wasStreaming = prevStreamingRef.current;
+    prevStreamingRef.current = isStreaming;
+
+    if (wasStreaming && !isStreaming) {
+      // Streaming just stopped — send the next queued message
+      setMessageQueue((prev) => {
+        if (prev.length === 0) return prev;
+        const [next, ...rest] = prev;
+        // Use setTimeout to avoid sending during render
+        setTimeout(() => onSend(next.text, next.images), 0);
+        return rest;
+      });
+    }
+  }, [isStreaming, onSend]);
+
   const addImageFiles = useCallback(
     (files: FileList | File[]) => {
       setImageError(null);
@@ -120,7 +147,6 @@ export function Editor({ onSend, onAbort }: EditorProps) {
         const reader = new FileReader();
         reader.onload = () => {
           const dataUrl = reader.result as string;
-          // Strip the data:image/...;base64, prefix for the server payload
           const base64Data = dataUrl.split(",")[1];
           setImages((prev) => {
             if (prev.length >= MAX_IMAGES) return prev;
@@ -144,6 +170,10 @@ export function Editor({ onSend, onAbort }: EditorProps) {
   const removeImage = useCallback((id: string) => {
     setImages((prev) => prev.filter((img) => img.id !== id));
     setImageError(null);
+  }, []);
+
+  const removeQueuedMessage = useCallback((id: number) => {
+    setMessageQueue((prev) => prev.filter((m) => m.id !== id));
   }, []);
 
   const handlePaste = useCallback(
@@ -201,7 +231,16 @@ export function Editor({ onSend, onAbort }: EditorProps) {
       ? images.map((img) => ({ data: img.data, mimeType: img.mimeType }))
       : undefined;
 
-    onSend(trimmed || "(image)", imagePayload);
+    if (isStreaming) {
+      // Queue the message instead of sending immediately
+      setMessageQueue((prev) => [
+        ...prev,
+        { id: ++queueIdCounter, text: trimmed || "(image)", images: imagePayload },
+      ]);
+    } else {
+      onSend(trimmed || "(image)", imagePayload);
+    }
+
     setInput("");
     setImages([]);
     setImageError(null);
@@ -209,7 +248,7 @@ export function Editor({ onSend, onAbort }: EditorProps) {
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [input, images, onSend]);
+  }, [input, images, isStreaming, onSend]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -263,6 +302,29 @@ export function Editor({ onSend, onAbort }: EditorProps) {
         <div className="mb-2 text-xs text-red-400">{imageError}</div>
       )}
 
+      {/* Queued message pills */}
+      {messageQueue.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {messageQueue.map((msg) => (
+            <div
+              key={msg.id}
+              className="flex items-center gap-1.5 rounded-full bg-zinc-800 border border-zinc-700 px-3 py-1 text-xs text-zinc-300 max-w-xs"
+            >
+              <span className="truncate">{msg.text}</span>
+              <button
+                onClick={() => removeQueuedMessage(msg.id)}
+                className="shrink-0 rounded-full p-0.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-600 transition-colors"
+                title="Remove from queue"
+              >
+                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -286,8 +348,8 @@ export function Editor({ onSend, onAbort }: EditorProps) {
           onPaste={handlePaste}
           placeholder={
             isStreaming
-              ? "Type to queue a follow-up... (Escape to abort)"
-              : "Type a message... (Shift+Enter for new line)"
+              ? "Type to queue a follow-up… (Escape to abort)"
+              : "Type a message… (Shift+Enter for new line)"
           }
           rows={1}
           className="flex-1 resize-none bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
@@ -311,8 +373,8 @@ export function Editor({ onSend, onAbort }: EditorProps) {
           </button>
         )}
 
-        {/* Send / Abort button */}
-        {isStreaming ? (
+        {/* Abort button (only while streaming) */}
+        {isStreaming && (
           <button
             onClick={onAbort}
             className="shrink-0 rounded-lg bg-red-900/50 p-2 text-red-300 hover:bg-red-900/80 transition-colors"
@@ -322,23 +384,38 @@ export function Editor({ onSend, onAbort }: EditorProps) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
-        ) : (
-          <button
-            onClick={handleSubmit}
-            disabled={!input.trim() && images.length === 0}
-            className="shrink-0 rounded-lg bg-violet-600 p-2 text-white hover:bg-violet-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            title="Send (Enter)"
-          >
+        )}
+
+        {/* Send button (always visible, queues if streaming) */}
+        <button
+          onClick={handleSubmit}
+          disabled={!input.trim() && images.length === 0}
+          className={`shrink-0 rounded-lg p-2 transition-colors ${
+            isStreaming
+              ? "bg-violet-600/60 text-white hover:bg-violet-500/60 disabled:opacity-30 disabled:cursor-not-allowed"
+              : "bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-30 disabled:cursor-not-allowed"
+          }`}
+          title={isStreaming ? "Queue message" : "Send (Enter)"}
+        >
+          {isStreaming ? (
+            // Queue icon (plus)
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+          ) : (
+            // Send icon (arrow)
             <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
             </svg>
-          </button>
-        )}
+          )}
+        </button>
       </div>
 
       <div className="mt-1.5 flex items-center justify-between px-1">
         <span className="text-[10px] text-zinc-600">
-          Shift+Enter for new line · Escape to abort · Paste or drag images
+          {isStreaming
+            ? `Shift+Enter for new line · Escape to abort · Messages will queue${messageQueue.length > 0 ? ` (${messageQueue.length} queued)` : ""}`
+            : "Shift+Enter for new line · Escape to abort · Paste or drag images"}
         </span>
       </div>
     </div>
