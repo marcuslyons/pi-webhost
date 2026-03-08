@@ -362,6 +362,7 @@ export function useAgent() {
           timestamp: Date.now(),
           toolName: event.toolName,
           toolCallId: event.toolCallId,
+          toolArgs: event.args,
         });
         break;
       }
@@ -628,6 +629,13 @@ export function useAgent() {
     [send],
   );
 
+  const compact = useCallback(() => {
+    const sid = store().activeSessionId;
+    if (sid) {
+      send({ type: "compact", sessionId: sid });
+    }
+  }, [send]);
+
   const fetchModels = useCallback(() => {
     send({ type: "get_models" });
   }, [send]);
@@ -664,6 +672,7 @@ export function useAgent() {
   return {
     sendPrompt,
     abort,
+    compact,
     setModel,
     setThinkingLevel,
     newSession,
@@ -710,6 +719,7 @@ function buildMessagesFromHistory(rawMessages: any[]): import("../lib/types").Ch
             timestamp: msg.timestamp,
             toolName: tc.name,
             toolCallId: tc.id,
+            toolArgs: tc.arguments ?? undefined,
           });
         }
       }

@@ -47,6 +47,7 @@ export interface ChatMessage {
   // Tool-specific
   toolName?: string;
   toolCallId?: string;
+  toolArgs?: Record<string, unknown>;
   isError?: boolean;
 }
 

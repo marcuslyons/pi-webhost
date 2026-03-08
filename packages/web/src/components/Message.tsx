@@ -1,7 +1,72 @@
-import { useState, memo } from "react";
+import { useState, useMemo, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../lib/types";
+
+// ── Inline diff helpers ─────────────────────────────────────────────
+
+interface DiffLine {
+  type: "removed" | "added" | "context";
+  text: string;
+}
+
+function computeInlineDiff(oldText: string, newText: string): DiffLine[] {
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+  const lines: DiffLine[] = [];
+  for (const line of oldLines) {
+    lines.push({ type: "removed", text: line });
+  }
+  for (const line of newLines) {
+    lines.push({ type: "added", text: line });
+  }
+  return lines;
+}
+
+function isEditToolCall(message: ChatMessage): { oldText: string; newText: string; path: string } | null {
+  if (message.role !== "tool_call") return null;
+  const name = message.toolName?.toLowerCase();
+  if (name !== "edit") return null;
+  const args = message.toolArgs;
+  if (!args) return null;
+  const oldText = (args.oldText ?? args.old_text) as string | undefined;
+  const newText = (args.newText ?? args.new_text) as string | undefined;
+  const path = (args.path ?? args.file) as string | undefined;
+  if (!oldText || !newText) return null;
+  return { oldText, newText, path: path ?? "unknown" };
+}
+
+function InlineDiff({ oldText, newText }: { oldText: string; newText: string }) {
+  const lines = useMemo(() => computeInlineDiff(oldText, newText), [oldText, newText]);
+  return (
+    <pre className="font-mono text-xs max-h-80 overflow-y-auto">
+      {lines.map((line, i) => {
+        if (line.type === "removed") {
+          return (
+            <div key={i} className="bg-red-500/10 text-red-400">
+              <span className="select-none opacity-60">- </span>
+              {line.text}
+            </div>
+          );
+        }
+        if (line.type === "added") {
+          return (
+            <div key={i} className="bg-emerald-500/10 text-emerald-400">
+              <span className="select-none opacity-60">+ </span>
+              {line.text}
+            </div>
+          );
+        }
+        return (
+          <div key={i} className="text-zinc-500">
+            <span className="select-none opacity-60">  </span>
+            {line.text}
+          </div>
+        );
+      })}
+    </pre>
+  );
+}
 
 interface MessageProps {
   message: ChatMessage;
@@ -87,7 +152,11 @@ export const Message = memo(function Message({ message }: MessageProps) {
         </div>
       );
 
-    case "tool_call":
+    case "tool_call": {
+      const editData = isEditToolCall(message);
+      if (editData) {
+        return <EditToolCall message={message} editData={editData} />;
+      }
       return (
         <div className="flex justify-start pl-2 sm:pl-4">
           <div className="max-w-[95%] sm:max-w-[85%] rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2">
@@ -102,6 +171,7 @@ export const Message = memo(function Message({ message }: MessageProps) {
           </div>
         </div>
       );
+    }
 
     case "tool_result":
       return (
@@ -156,6 +226,45 @@ export const Message = memo(function Message({ message }: MessageProps) {
       return null;
   }
 });
+
+function EditToolCall({
+  message,
+  editData,
+}: {
+  message: ChatMessage;
+  editData: { oldText: string; newText: string; path: string };
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="flex justify-start pl-2 sm:pl-4">
+      <div className="max-w-[95%] sm:max-w-[85%] rounded-lg border border-zinc-800 bg-zinc-900/30">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-400 transition-colors"
+        >
+          <svg
+            className={`h-3 w-3 transition-transform ${expanded ? "rotate-90" : ""}`}
+            fill="currentColor"
+            viewBox="0 0 20 20"
+          >
+            <path d="M6 4l8 6-8 6V4z" />
+          </svg>
+          <span className="font-mono font-medium text-[10px] text-amber-500/80 uppercase">
+            {message.toolName}
+          </span>
+          <span className="font-mono text-zinc-500">
+            {message.content}
+          </span>
+        </button>
+        {expanded && (
+          <div className="border-t border-zinc-800 px-3 py-2">
+            <InlineDiff oldText={editData.oldText} newText={editData.newText} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function abbreviateTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
