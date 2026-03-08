@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type DragEvent, type ClipboardEvent } from "react";
 import { useChatStore } from "../stores/chatStore";
 
+// ── Speech recognition support ─────────────────────────────────────
+
+const SpeechRecognitionCtor =
+  typeof window !== "undefined"
+    ? window.SpeechRecognition ?? window.webkitSpeechRecognition
+    : undefined;
+
+const hasSpeechSupport = !!SpeechRecognitionCtor;
+
 interface PendingImage {
   id: string;
   data: string; // base64 data URL
@@ -36,6 +45,68 @@ export function Editor({ onSend, onAbort }: EditorProps) {
   const prevStreamingRef = useRef(isStreaming);
 
   const imageIdCounter = useRef(0);
+
+  // ── Speech recognition ──────────────────────────────────────────
+
+  const [isRecording, setIsRecording] = useState(false);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+
+  // Clean up recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.abort();
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
+
+  const toggleRecording = useCallback(() => {
+    if (isRecording) {
+      // Stop recording
+      recognitionRef.current?.stop();
+      return;
+    }
+
+    if (!SpeechRecognitionCtor) return;
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = navigator.language || "en-US";
+
+    // Track the text that existed before recording started
+    const baseText = input;
+    let finalizedText = "";
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      let interim = "";
+      for (let i = 0; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          finalizedText += result[0].transcript;
+        } else {
+          interim += result[0].transcript;
+        }
+      }
+      const separator = baseText && !baseText.endsWith(" ") ? " " : "";
+      setInput(baseText + separator + finalizedText + interim);
+    };
+
+    recognition.onerror = () => {
+      setIsRecording(false);
+      recognitionRef.current = null;
+    };
+
+    recognition.onend = () => {
+      setIsRecording(false);
+      recognitionRef.current = null;
+    };
+
+    recognition.start();
+    recognitionRef.current = recognition;
+    setIsRecording(true);
+  }, [isRecording, input]);
 
   // Auto-flush queue when streaming stops
   useEffect(() => {
@@ -284,6 +355,23 @@ export function Editor({ onSend, onAbort }: EditorProps) {
           className="flex-1 resize-none bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
           autoFocus
         />
+
+        {/* Mic button — speech recognition */}
+        {hasSpeechSupport && (
+          <button
+            onClick={toggleRecording}
+            className={`shrink-0 rounded-lg p-2 transition-colors ${
+              isRecording
+                ? "animate-pulse bg-red-500/20 text-red-400 hover:bg-red-500/30"
+                : "text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+            }`}
+            title={isRecording ? "Stop recording" : "Start voice input"}
+          >
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
+            </svg>
+          </button>
+        )}
 
         {/* Abort button (only while streaming) */}
         {isStreaming && (
