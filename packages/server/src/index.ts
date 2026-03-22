@@ -12,6 +12,7 @@ import { cors } from "hono/cors";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { readFileSync, existsSync } from "node:fs";
 import { createServer as createHttpsServer } from "node:https";
+import { networkInterfaces } from "node:os";
 import { AgentManager } from "./agent/manager.js";
 import { createApiRoutes } from "./api/routes.js";
 import { createWSHandlers } from "./ws/handler.js";
@@ -33,12 +34,23 @@ if (authMiddleware) {
   console.log("[auth] Authentication enabled");
 }
 
-// CORS for dev (Vite runs on different port)
+// CORS for dev (Vite runs on different port, possibly from LAN)
 if (DEV) {
   app.use(
     "/api/*",
     cors({
-      origin: ["http://localhost:5173", "http://localhost:3141"],
+      origin: (origin) => {
+        // Allow requests with no origin (e.g. server-to-server, curl)
+        if (!origin) return origin;
+        try {
+          const url = new URL(origin);
+          // Allow any host on the Vite or server dev ports
+          if (url.port === "5173" || url.port === String(PORT)) {
+            return origin;
+          }
+        } catch {}
+        return undefined;
+      },
       credentials: true,
     }),
   );
@@ -88,6 +100,7 @@ if (useTLS) {
 
 const serveOptions: Parameters<typeof serve>[0] = {
   fetch: app.fetch,
+  hostname: "0.0.0.0",
   port: PORT,
   ...(useTLS
     ? {
@@ -103,15 +116,39 @@ const serveOptions: Parameters<typeof serve>[0] = {
 const protocol = useTLS ? "https" : "http";
 const wsProtocol = useTLS ? "wss" : "ws";
 
+function getLanAddress(): string | null {
+  const nets = networkInterfaces();
+  for (const iface of Object.values(nets)) {
+    for (const addr of iface ?? []) {
+      if (addr.family === "IPv4" && !addr.internal) {
+        return addr.address;
+      }
+    }
+  }
+  return null;
+}
+
 const server = serve(serveOptions, (info) => {
-  console.log(`
-┌─────────────────────────────────────────┐
-│  pi-webhost server                      │
-│                                         │
-│  ${protocol}://localhost:${String(info.port).padEnd(24 - protocol.length + 4)}│
-│  ${wsProtocol}://localhost:${String(info.port).padEnd(19 - wsProtocol.length + 4)}│${DEV ? "\n│  Mode: development                      │" : "\n│  Mode: production                       │"}${useTLS ? "\n│  TLS: enabled                           │" : ""}
-└─────────────────────────────────────────┘
-`);
+  const lanIp = getLanAddress();
+  const portStr = String(info.port);
+  const lines = [
+    `  ${protocol}://localhost:${portStr}`,
+    ...(lanIp ? [`  ${protocol}://${lanIp}:${portStr}`] : []),
+    `  ${wsProtocol}://localhost:${portStr}`,
+    ...(lanIp ? [`  ${wsProtocol}://${lanIp}:${portStr}`] : []),
+    `  Mode: ${DEV ? "development" : "production"}`,
+    ...(useTLS ? ["  TLS: enabled"] : []),
+  ];
+  const maxLen = Math.max(...lines.map((l) => l.length));
+  const width = Math.max(maxLen + 2, 41);
+  const header = "  pi-webhost server";
+  console.log(
+    "\n┌" + "─".repeat(width) + "┐\n" +
+    "│" + header + " ".repeat(width - header.length) + "│\n" +
+    "│" + " ".repeat(width) + "│\n" +
+    lines.map((l) => "│" + l + " ".repeat(width - l.length) + "│").join("\n") + "\n" +
+    "└" + "─".repeat(width) + "┘\n"
+  );
 });
 
 injectWebSocket(server);
